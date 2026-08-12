@@ -1,0 +1,1500 @@
+<meta charset="utf-8">
+<style>
+  :root {
+    --bg: var(--figma-color-bg, #ffffff);
+    --text: var(--figma-color-text, #1e1e1e);
+    --text-2: var(--figma-color-text-secondary, #7a7a7a);
+    --border: var(--figma-color-border, #e6e6e6);
+    --accent: var(--figma-color-bg-brand, #0d99ff);
+    --accent-text: var(--figma-color-text-onbrand, #ffffff);
+    --surface: var(--figma-color-bg-secondary, #f5f5f5);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font: 11px/1.45 Inter, "SF Pro Text", -apple-system, system-ui, sans-serif;
+    color: var(--text); background: var(--bg);
+    padding: 12px; user-select: none;
+  }
+
+  #dropzone {
+    position: relative; height: 220px; border: 1px dashed var(--border);
+    border-radius: 8px; background: var(--surface); overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    text-align: center; color: var(--text-2); cursor: pointer;
+  }
+  #dropzone.dragover { border-color: var(--accent); }
+  #dropzone .hint { padding: 0 24px; }
+  #dropzone .hint strong { display: block; color: var(--text); margin-bottom: 4px; }
+  #preview { position: absolute; inset: 0; display: none; background:
+    repeating-conic-gradient(rgba(128,128,128,.12) 0% 25%, transparent 0% 50%) 0 0 / 16px 16px; }
+  #preview img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  #srcImg { opacity: 0.18; filter: grayscale(1); }
+  #dropzone.has-image .hint { display: none; }
+  #dropzone.has-image #preview { display: block; }
+
+  .row { display: flex; gap: 8px; margin-top: 8px; }
+  .row > * { flex: 1; }
+
+  button {
+    font: inherit; font-weight: 500; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text);
+    border-radius: 6px; padding: 7px 10px; cursor: pointer;
+  }
+  button:hover { background: var(--surface); }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+  button.primary:hover { filter: brightness(1.06); }
+  button:disabled { opacity: 0.4; cursor: default; }
+
+  #thicknessRow {
+    display: none; margin-top: 10px;
+    grid-template-columns: 62px 1fr 44px; align-items: center; gap: 8px;
+  }
+  #thicknessRow.visible { display: grid; }
+  #thicknessRow label { color: var(--text-2); }
+  #thicknessRow output { text-align: right; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+
+  #status { margin-top: 8px; color: var(--text-2); min-height: 14px; }
+  #status .mode { color: var(--text); }
+</style>
+
+<div id="dropzone">
+  <div class="hint">
+    <strong>Drop a line-art image here</strong>
+    Everything is traced automatically.<br>
+    Paste (⌘V) or use a selected Figma layer too.
+  </div>
+  <div id="preview">
+    <img id="srcImg" alt="">
+    <img id="traceImg" alt="">
+  </div>
+</div>
+<input type="file" id="fileInput" accept="image/*" hidden>
+
+<div class="row">
+  <button id="openBtn">Open image…</button>
+  <button id="selBtn" disabled>Use selected layer</button>
+</div>
+<div class="row" id="actions" style="display:none">
+  <button id="copyBtn">Copy SVG</button>
+  <button id="importBtn" class="primary">Add to canvas</button>
+</div>
+<div id="thicknessRow">
+  <label for="thickness">Thickness</label>
+  <input type="range" id="thickness" min="25" max="400" value="100" step="5">
+  <output id="thicknessOut">100%</output>
+</div>
+<div id="status"></div>
+
+<script>
+/* ===== TRACER-START =====
+ * Fully automatic centerline vectorizer:
+ *   binarize (Otsu + polarity auto) -> Zhang-Suen thinning -> skeleton walk
+ *   -> per-line thickness (distance transform) -> junction merge (lines
+ *   continue through crossings) -> artifact pruning (hairs, knots, specks)
+ *   -> least-squares Bezier fitting (few pen-tool-like anchors) -> SVG,
+ *   one <path> per line weight, widths matching the source image.
+ * Pure functions over {data, width, height} — same code runs in the plugin
+ * iframe and the Node test harness.
+ */
+const LineTracer = (() => {
+
+  function otsu(hist, total) {
+    let sum = 0;
+    for (let i = 0; i < 256; i++) sum += i * hist[i];
+    let sumB = 0, wB = 0, maxVar = -1, thr = 128;
+    for (let t = 0; t < 256; t++) {
+      wB += hist[t];
+      if (wB === 0) continue;
+      const wF = total - wB;
+      if (wF === 0) break;
+      sumB += t * hist[t];
+      const mB = sumB / wB, mF = (sum - sumB) / wF;
+      const v = wB * wF * (mB - mF) * (mB - mF);
+      if (v > maxVar) { maxVar = v; thr = t; }
+    }
+    return thr;
+  }
+
+  // What kind of image is this: transparent-background line art, dark lines
+  // on light, or light lines on dark — and what's the ideal threshold?
+  function analyze(img) {
+    const { data, width, height } = img;
+    const total = width * height;
+    const hist = new Uint32Array(256);
+    let transparent = 0;
+    for (let i = 0; i < total; i++) {
+      const o = i * 4;
+      const a = data[o + 3] / 255;
+      if (a < 0.1) transparent++;
+      const lum = 0.2126 * data[o] + 0.7152 * data[o + 1] + 0.0722 * data[o + 2];
+      hist[Math.round(lum * a + 255 * (1 - a))]++; // composited over white
+    }
+    const thr = otsu(hist, total);
+    let dark = 0;
+    for (let t = 0; t <= thr; t++) dark += hist[t]; // Otsu classes: [0..thr] | [thr+1..255]
+    const transparentFrac = transparent / total;
+    let mode;
+    // alpha mode only when the art itself is the opaque minority (logo-style
+    // PNGs); transparent margins around artwork still trace by luminance
+    if (transparentFrac > 0.5) mode = 'alpha';
+    else mode = dark / total <= 0.5 ? 'dark' : 'light';
+    const threshold = mode === 'alpha' ? 128 : Math.min(254, Math.max(1, thr));
+    return { threshold, mode, transparentFrac };
+  }
+
+  function binarize(img, threshold, mode) {
+    const { data, width, height } = img;
+    const total = width * height;
+    const bin = new Uint8Array(total);
+    for (let i = 0; i < total; i++) {
+      const o = i * 4;
+      const a = data[o + 3] / 255;
+      if (mode === 'alpha') {
+        bin[i] = data[o + 3] >= threshold ? 1 : 0;
+      } else {
+        const lum = 0.2126 * data[o] + 0.7152 * data[o + 1] + 0.0722 * data[o + 2];
+        // round like analyze() or values on the Otsu bin flip class
+        if (mode === 'dark') {
+          bin[i] = Math.round(lum * a + 255 * (1 - a)) <= threshold ? 1 : 0;
+        } else {
+          bin[i] = Math.round(lum * a) > threshold ? 1 : 0;
+        }
+      }
+    }
+    return bin;
+  }
+
+  // Separable box blur (~Gaussian) — the standard denoise step before
+  // binarizing low-quality sources. Whether it's used is decided per image
+  // by skeleton-topology scoring, so clean fine detail is never blurred.
+  function boxBlurRGBA(img, r) {
+    const { width: w, height: h, data } = img;
+    const tmp = new Float32Array(data.length);
+    const out = new Uint8ClampedArray(data.length);
+    const span = 2 * r + 1;
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      for (let ch = 0; ch < 4; ch++) {
+        let acc = 0;
+        for (let x = -r; x <= r; x++) acc += data[(row + Math.min(w - 1, Math.max(0, x))) * 4 + ch];
+        for (let x = 0; x < w; x++) {
+          tmp[(row + x) * 4 + ch] = acc / span;
+          acc += data[(row + Math.min(w - 1, x + r + 1)) * 4 + ch]
+               - data[(row + Math.max(0, x - r)) * 4 + ch];
+        }
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      for (let ch = 0; ch < 4; ch++) {
+        let acc = 0;
+        for (let y = -r; y <= r; y++) acc += tmp[(Math.min(h - 1, Math.max(0, y)) * w + x) * 4 + ch];
+        for (let y = 0; y < h; y++) {
+          out[(y * w + x) * 4 + ch] = acc / span;
+          acc += tmp[(Math.min(h - 1, y + r + 1) * w + x) * 4 + ch]
+               - tmp[(Math.max(0, y - r) * w + x) * 4 + ch];
+        }
+      }
+    }
+    return { width: w, height: h, data: out };
+  }
+
+  // Fill pinholes inside strokes: JPEG mottling / upscaling noise leaves
+  // tiny light specks inside fat ink, and each one splits the skeleton into
+  // a ladder of doubled centerlines. Real windows/counters are far larger.
+  function fillHoles(bin, w, h) {
+    const total = w * h;
+    const maxArea = Math.min(150, Math.max(24, Math.round(total * 0.0002)));
+    const mark = new Uint8Array(total); // background reachable from border
+    const stack = [];
+    const push = i => { if (!mark[i] && !bin[i]) { mark[i] = 1; stack.push(i); } };
+    for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+    for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+    while (stack.length) {
+      const i = stack.pop();
+      const x = i % w, y = (i / w) | 0;
+      if (x > 0) push(i - 1);
+      if (x < w - 1) push(i + 1);
+      if (y > 0) push(i - w);
+      if (y < h - 1) push(i + w);
+    }
+    const seen = new Uint8Array(total);
+    const comp = [];
+    for (let i = 0; i < total; i++) {
+      if (bin[i] || mark[i] || seen[i]) continue;
+      comp.length = 0;
+      seen[i] = 1;
+      stack.push(i);
+      comp.push(i);
+      while (stack.length) {
+        const j = stack.pop();
+        const x = j % w, y = (j / w) | 0;
+        if (x > 0 && !bin[j - 1] && !mark[j - 1] && !seen[j - 1]) { seen[j - 1] = 1; stack.push(j - 1); comp.push(j - 1); }
+        if (x < w - 1 && !bin[j + 1] && !mark[j + 1] && !seen[j + 1]) { seen[j + 1] = 1; stack.push(j + 1); comp.push(j + 1); }
+        if (y > 0 && !bin[j - w] && !mark[j - w] && !seen[j - w]) { seen[j - w] = 1; stack.push(j - w); comp.push(j - w); }
+        if (y < h - 1 && !bin[j + w] && !mark[j + w] && !seen[j + w]) { seen[j + w] = 1; stack.push(j + w); comp.push(j + w); }
+      }
+      if (comp.length <= maxArea) for (const j of comp) bin[j] = 1;
+    }
+    return bin;
+  }
+
+  // Zhang-Suen thinning to a 1px skeleton (padded copy, no bounds checks)
+  function thin(bin, w, h) {
+    const W = w + 2;
+    const img = new Uint8Array(W * (h + 2));
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++)
+        img[(y + 1) * W + (x + 1)] = bin[y * w + x];
+
+    const toClear = [];
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (let step = 0; step < 2; step++) {
+        toClear.length = 0;
+        for (let y = 1; y <= h; y++) {
+          const row = y * W;
+          for (let x = 1; x <= w; x++) {
+            const i = row + x;
+            if (!img[i]) continue;
+            const p2 = img[i - W], p3 = img[i - W + 1], p4 = img[i + 1],
+                  p5 = img[i + W + 1], p6 = img[i + W], p7 = img[i + W - 1],
+                  p8 = img[i - 1], p9 = img[i - W - 1];
+            const b = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+            if (b < 2 || b > 6) continue;
+            let a = 0;
+            if (!p2 && p3) a++;
+            if (!p3 && p4) a++;
+            if (!p4 && p5) a++;
+            if (!p5 && p6) a++;
+            if (!p6 && p7) a++;
+            if (!p7 && p8) a++;
+            if (!p8 && p9) a++;
+            if (!p9 && p2) a++;
+            if (a !== 1) continue;
+            if (step === 0) {
+              if (p2 * p4 * p6 !== 0 || p4 * p6 * p8 !== 0) continue;
+            } else {
+              if (p2 * p4 * p8 !== 0 || p2 * p6 * p8 !== 0) continue;
+            }
+            toClear.push(i);
+          }
+        }
+        if (toClear.length) {
+          changed = true;
+          for (let k = 0; k < toClear.length; k++) img[toClear[k]] = 0;
+        }
+      }
+    }
+
+    const out = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++)
+        out[y * w + x] = img[(y + 1) * W + (x + 1)];
+    return out;
+  }
+
+  // Chamfer 3-4 distance to background; dist/3 ~ radius in px, so line width
+  // at a skeleton pixel is ~2*(dist/3)-1
+  function distanceTransform(bin, w, h) {
+    const d = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (!bin[i]) { d[i] = 0; continue; }
+        d[i] = Math.min(
+          x > 0 ? d[i - 1] + 3 : 3,
+          y > 0 ? d[i - w] + 3 : 3,
+          x > 0 && y > 0 ? d[i - w - 1] + 4 : 4,
+          x < w - 1 && y > 0 ? d[i - w + 1] + 4 : 4);
+      }
+    }
+    for (let y = h - 1; y >= 0; y--) {
+      for (let x = w - 1; x >= 0; x--) {
+        const i = y * w + x;
+        if (!d[i]) continue;
+        d[i] = Math.min(d[i],
+          x < w - 1 ? d[i + 1] + 3 : 3,
+          y < h - 1 ? d[i + w] + 3 : 3,
+          x < w - 1 && y < h - 1 ? d[i + w + 1] + 4 : 4,
+          x > 0 && y < h - 1 ? d[i + w - 1] + 4 : 4);
+      }
+    }
+    return d;
+  }
+
+  const NBR = [1, 0, 1, 1, 0, 1, -1, 1, -1, 0, -1, -1, 0, -1, 1, -1];
+
+  // Skeleton topology stats (same pruned-diagonal adjacency the extractor
+  // uses). Junctions mean lines fused together; endpoints mean lines broke.
+  function topoStats(skel, w, h) {
+    let px = 0, ends = 0, junctions = 0, isolated = 0;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (!skel[i]) continue;
+        px++;
+        let d = 0;
+        for (let k = 0; k < 16; k += 2) {
+          const dx = NBR[k], dy = NBR[k + 1];
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || nx >= w || ny < 0 || ny >= h || !skel[ny * w + nx]) continue;
+          if (dx !== 0 && dy !== 0 && (skel[y * w + nx] || skel[ny * w + x])) continue;
+          d++;
+        }
+        if (d === 1) ends++;
+        else if (d >= 3) junctions++;
+        else if (d === 0) isolated++; // stray noise dots
+      }
+    }
+    return {
+      px, ends, junctions, isolated,
+      score: px - 12 * junctions - 3 * ends - 8 * isolated
+    };
+  }
+
+  // Walk the skeleton into chains between endpoints/junctions + pure loops.
+  function extractChains(skel, w, h) {
+    const total = w * h;
+
+    // diagonal edges only when no orthogonal 2-step path exists — otherwise
+    // thinning staircases read as fake junctions
+    const neighborsOf = (i, out) => {
+      const x = i % w, y = (i / w) | 0;
+      let n = 0;
+      for (let k = 0; k < 16; k += 2) {
+        const dx = NBR[k], dy = NBR[k + 1];
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || nx >= w || ny < 0 || ny >= h || !skel[ny * w + nx]) continue;
+        if (dx !== 0 && dy !== 0 && (skel[y * w + nx] || skel[ny * w + x])) continue;
+        out[n++] = ny * w + nx;
+      }
+      return n;
+    };
+
+    const degBuf = new Int32Array(8);
+    const deg = new Uint8Array(total);
+    for (let i = 0; i < total; i++) if (skel[i]) deg[i] = neighborsOf(i, degBuf);
+
+    const usedEdges = new Set();
+    const edgeKey = (a, b) => (a < b ? a * total + b : b * total + a);
+    const visited = new Uint8Array(total);
+    const chains = [];
+    const nbuf = new Int32Array(8);
+
+    function walk(start, next, stopAtStart) {
+      const pts = [start, next];
+      usedEdges.add(edgeKey(start, next));
+      let prev = start, cur = next;
+      let guard = total + 1;
+      while (deg[cur] === 2 && guard-- > 0) {
+        if (stopAtStart && cur === start) break;
+        visited[cur] = 1;
+        const n = neighborsOf(cur, nbuf);
+        let nxt = -1;
+        for (let k = 0; k < n; k++) if (nbuf[k] !== prev) { nxt = nbuf[k]; break; }
+        if (nxt === -1) break;
+        usedEdges.add(edgeKey(cur, nxt));
+        pts.push(nxt);
+        prev = cur;
+        cur = nxt;
+        if (stopAtStart && cur === start) break;
+      }
+      return pts;
+    }
+
+    for (let i = 0; i < total; i++) {
+      if (!skel[i] || deg[i] === 2) continue;
+      if (deg[i] === 0) {
+        chains.push({ pts: [i], closed: false, endDeg: [0, 0] }); // dot candidate
+        continue;
+      }
+      const n = neighborsOf(i, nbuf);
+      const nbrs = Array.from(nbuf.slice(0, n));
+      for (const nb of nbrs) {
+        if (usedEdges.has(edgeKey(i, nb))) continue;
+        const pts = walk(i, nb, false);
+        chains.push({ pts, closed: false, endDeg: [deg[pts[0]], deg[pts[pts.length - 1]]] });
+      }
+    }
+    for (let i = 0; i < total; i++) { // pure loops
+      if (!skel[i] || deg[i] !== 2 || visited[i]) continue;
+      visited[i] = 1;
+      neighborsOf(i, nbuf);
+      const pts = walk(i, nbuf[0], true);
+      if (pts.length > 2 && pts[pts.length - 1] === i) pts.pop();
+      chains.push({ pts, closed: pts.length >= 3, endDeg: [2, 2] });
+    }
+
+    return chains.map(c => ({
+      closed: c.closed,
+      endDeg: c.endDeg,
+      points: c.pts.map(i => [(i % w) + 0.5, ((i / w) | 0) + 0.5])
+    }));
+  }
+
+  // Rejoin chains that continue through a junction: crossings and touching
+  // neighbors chop drawn lines into fragments — pair up ends that meet at
+  // the same junction going in opposite directions with similar widths, so
+  // lines flow through intersections like in the original drawing.
+  function mergeChains(chains) {
+    const dirAt = (c, end) => {
+      const pts = c.points, n = pts.length;
+      const a = end === 0 ? pts[0] : pts[n - 1];
+      const k = Math.min(7, n - 1);
+      const b = end === 0 ? pts[k] : pts[n - 1 - k];
+      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const len = Math.hypot(dx, dy) || 1;
+      return [dx / len, dy / len]; // pointing inward, away from the junction
+    };
+
+    let list = chains.slice();
+    for (let round = 0; round < 4; round++) {
+      const ends = [];
+      list.forEach((c, ci) => {
+        if (c.closed || c.points.length < 2) return;
+        for (const e of [0, 1]) {
+          if (c.endDeg && c.endDeg[e] > 2) {
+            // trimmed ends pair by their remembered junction point
+            const tr = c.trim && c.trim[e];
+            const p = tr ? tr.p : (e === 0 ? c.points[0] : c.points[c.points.length - 1]);
+            ends.push({ ci, e, p, jr: tr ? tr.r : 2, dir: dirAt(c, e), width: c.width || 1 });
+          }
+        }
+      });
+      if (ends.length < 2) break;
+
+      // candidate pairs: ends at the same junction (radius scales with the
+      // junction blob), opposite directions, similar width
+      const pairs = [];
+      for (let i = 0; i < ends.length; i++) {
+        for (let j = i + 1; j < ends.length; j++) {
+          const A = ends[i], B = ends[j];
+          const lim = Math.max(4, (A.jr + B.jr) * 0.75);
+          const dx = Math.abs(A.p[0] - B.p[0]), dy = Math.abs(A.p[1] - B.p[1]);
+          if (dx > lim || dy > lim) continue;
+          const cos = A.dir[0] * B.dir[0] + A.dir[1] * B.dir[1];
+          // distant ends (big junction blobs) may only bridge when nearly
+          // perfectly collinear — loose gates here misroute across junctions
+          const far = Math.hypot(dx, dy) > 6;
+          if (cos > (far ? -0.85 : -0.55)) continue;
+          const ratio = Math.max(A.width, B.width) / Math.max(0.01, Math.min(A.width, B.width));
+          if (ratio > (far ? 1.35 : 1.7)) continue;
+          pairs.push({ A, B, cos });
+        }
+      }
+      if (!pairs.length) break;
+      pairs.sort((a, b) => a.cos - b.cos); // straightest continuations first
+
+      const usedChain = new Set(), usedEnd = new Set();
+      const endKey = t => t.ci + ':' + t.e;
+      const ops = [];
+      for (const pr of pairs) {
+        if (usedEnd.has(endKey(pr.A)) || usedEnd.has(endKey(pr.B))) continue;
+        if (pr.A.ci === pr.B.ci) {
+          const c = list[pr.A.ci];
+          const len = c.geomLength != null ? c.geomLength : c.points.length;
+          if (usedChain.has(pr.A.ci) || len < 4 * (c.width || 1)) continue;
+          ops.push({ close: pr.A.ci });
+        } else {
+          if (usedChain.has(pr.A.ci) || usedChain.has(pr.B.ci)) continue;
+          ops.push({ a: pr.A, b: pr.B });
+          usedChain.add(pr.A.ci);
+          usedChain.add(pr.B.ci);
+        }
+        usedChain.add(pr.A.ci);
+        usedEnd.add(endKey(pr.A));
+        usedEnd.add(endKey(pr.B));
+      }
+      if (!ops.length) break;
+
+      const drop = new Set();
+      const added = [];
+      for (const op of ops) {
+        if (op.close != null) {
+          // ring closing at a junction: bridge through the junction center
+          const C = list[op.close];
+          const t0 = C.trim && C.trim[0], t1 = C.trim && C.trim[1];
+          const seam = t0 && t1 ? [[(t0.p[0] + t1.p[0]) / 2, (t0.p[1] + t1.p[1]) / 2]]
+            : t0 ? [t0.p] : t1 ? [t1.p] : [];
+          list[op.close] = Object.assign({}, C, {
+            closed: true,
+            points: C.points.concat(seam),
+            trim: [null, null]
+          });
+          continue;
+        }
+        const A = list[op.a.ci], B = list[op.b.ci];
+        const ptsA = op.a.e === 1 ? A.points.slice() : A.points.slice().reverse();
+        const ptsB = op.b.e === 0 ? B.points.slice() : B.points.slice().reverse();
+        const lenA = A.geomLength != null ? A.geomLength : A.points.length;
+        const lenB = B.geomLength != null ? B.geomLength : B.points.length;
+        // bridge trimmed ends through the junction center so the fitted
+        // curve passes where the strokes actually cross
+        const trA = A.trim && A.trim[op.a.e], trB = B.trim && B.trim[op.b.e];
+        const seam = trA && trB ? [[(trA.p[0] + trB.p[0]) / 2, (trA.p[1] + trB.p[1]) / 2]]
+          : trA ? [trA.p] : trB ? [trB.p] : [];
+        const gap = Math.hypot(ptsB[0][0] - ptsA[ptsA.length - 1][0], ptsB[0][1] - ptsA[ptsA.length - 1][1]);
+        const ew = ch => ch.endWidths || [ch.width || 1, ch.width || 1];
+        added.push({
+          closed: false,
+          points: ptsA.concat(seam, ptsB),
+          width: ((A.width || 1) * lenA + (B.width || 1) * lenB) / ((lenA + lenB) || 1),
+          geomLength: lenA + lenB + gap,
+          endDeg: [op.a.e === 1 ? A.endDeg[0] : A.endDeg[1], op.b.e === 0 ? B.endDeg[1] : B.endDeg[0]],
+          endWidths: [op.a.e === 1 ? ew(A)[0] : ew(A)[1], op.b.e === 0 ? ew(B)[1] : ew(B)[0]],
+          trim: [A.trim ? A.trim[1 - op.a.e] : null, B.trim ? B.trim[1 - op.b.e] : null]
+        });
+        drop.add(op.a.ci);
+        drop.add(op.b.ci);
+      }
+      list = list.filter((_, ci) => !drop.has(ci)).concat(added);
+    }
+    // a long chain whose two junction-attached ends nearly meet is a ring
+    // that lost a stretch to a shared fusion zone (a globe rim losing its
+    // pole trunk to the meridian) — close it and let the fit bridge the gap
+    for (const c of list) {
+      if (c.closed || !c.endDeg || c.endDeg[0] <= 2 || c.endDeg[1] <= 2) continue;
+      const len = c.geomLength || c.points.length;
+      if (len < 10 * (c.width || 1)) continue;
+      const a = c.points[0], b = c.points[c.points.length - 1];
+      if (Math.hypot(a[0] - b[0], a[1] - b[1]) < len * 0.15) c.closed = true;
+    }
+    // unpaired trimmed ends (a line terminating INTO another): extend
+    // straight back to the junction center so the joint visually connects
+    for (const c of list) {
+      if (!c.trim) continue;
+      if (c.trim[0]) {
+        c.geomLength = (c.geomLength || c.points.length) +
+          Math.hypot(c.trim[0].p[0] - c.points[0][0], c.trim[0].p[1] - c.points[0][1]);
+        c.points = [c.trim[0].p].concat(c.points);
+        c.trim[0] = null;
+      }
+      if (c.trim[1]) {
+        const last = c.points[c.points.length - 1];
+        c.geomLength = (c.geomLength || c.points.length) +
+          Math.hypot(c.trim[1].p[0] - last[0], c.trim[1].p[1] - last[1]);
+        c.points = c.points.concat([c.trim[1].p]);
+        c.trim[1] = null;
+      }
+    }
+    return list;
+  }
+
+  // iterative Ramer-Douglas-Peucker; robust to loops anchored on one point
+  function rdp(points, eps) {
+    if (eps <= 0 || points.length < 3) return points.slice();
+    const first = points[0], last = points[points.length - 1];
+    if (Math.hypot(last[0] - first[0], last[1] - first[1]) < 1e-9) {
+      let far = 1, maxD = -1;
+      for (let i = 1; i < points.length - 1; i++) {
+        const d = (points[i][0] - first[0]) ** 2 + (points[i][1] - first[1]) ** 2;
+        if (d > maxD) { maxD = d; far = i; }
+      }
+      return rdp(points.slice(0, far + 1), eps).concat(rdp(points.slice(far), eps).slice(1));
+    }
+    const keep = new Uint8Array(points.length);
+    keep[0] = keep[points.length - 1] = 1;
+    const stack = [[0, points.length - 1]];
+    while (stack.length) {
+      const [a, b] = stack.pop();
+      const [ax, ay] = points[a], [bx, by] = points[b];
+      const dx = bx - ax, dy = by - ay;
+      const len = Math.hypot(dx, dy) || 1e-12;
+      let maxD = -1, maxI = -1;
+      for (let i = a + 1; i < b; i++) {
+        const d = Math.abs(dy * points[i][0] - dx * points[i][1] + bx * ay - by * ax) / len;
+        if (d > maxD) { maxD = d; maxI = i; }
+      }
+      if (maxD > eps) {
+        keep[maxI] = 1;
+        stack.push([a, maxI], [maxI, b]);
+      }
+    }
+    return points.filter((_, i) => keep[i]);
+  }
+
+  function simplifyChain(chain, eps) {
+    if (!chain.closed) return { closed: false, points: rdp(chain.points, eps) };
+    const pts = chain.points;
+    if (pts.length < 4 || eps <= 0) return { closed: pts.length >= 3, points: pts.slice() };
+    // split the ring at the farthest point so RDP has distinct endpoints
+    let far = 1, maxD = -1;
+    for (let i = 1; i < pts.length; i++) {
+      const d = (pts[i][0] - pts[0][0]) ** 2 + (pts[i][1] - pts[0][1]) ** 2;
+      if (d > maxD) { maxD = d; far = i; }
+    }
+    const a = rdp(pts.slice(0, far + 1), eps);
+    const b = rdp(pts.slice(far).concat([pts[0]]), eps);
+    const points = a.concat(b.slice(1, -1));
+    return { closed: points.length >= 3, points };
+  }
+
+  const fmt = n => Math.round(n * 100) / 100;
+
+  // ---- least-squares cubic Bezier fitting (Schneider, Graphics Gems) ----
+  // Fits the FEWEST pen-tool-like curve segments within a tolerance, instead
+  // of threading a curve through every sampled point.
+  const V = {
+    sub: (a, b) => [a[0] - b[0], a[1] - b[1]],
+    add: (a, b) => [a[0] + b[0], a[1] + b[1]],
+    scale: (a, s) => [a[0] * s, a[1] * s],
+    dot: (a, b) => a[0] * b[0] + a[1] * b[1],
+    len: a => Math.hypot(a[0], a[1]),
+    norm: a => { const l = Math.hypot(a[0], a[1]) || 1; return [a[0] / l, a[1] / l]; }
+  };
+
+  function bezierPoint(ctrl, t) { // de Casteljau, any degree
+    const d = ctrl.map(p => [p[0], p[1]]);
+    for (let deg = ctrl.length - 1; deg > 0; deg--)
+      for (let i = 0; i < deg; i++) {
+        d[i][0] += (d[i + 1][0] - d[i][0]) * t;
+        d[i][1] += (d[i + 1][1] - d[i][1]) * t;
+      }
+    return d[0];
+  }
+
+  // least-squares placement of the two control points given end tangents
+  function generateBezier(pts, first, last, u, tHat1, tHat2) {
+    const p0 = pts[first], p3 = pts[last];
+    let C00 = 0, C01 = 0, C11 = 0, X0 = 0, X1 = 0;
+    for (let i = 0; i <= last - first; i++) {
+      const t = u[i], b = 1 - t;
+      const a0 = V.scale(tHat1, 3 * t * b * b);
+      const a1 = V.scale(tHat2, 3 * t * t * b);
+      C00 += V.dot(a0, a0); C01 += V.dot(a0, a1); C11 += V.dot(a1, a1);
+      const b0 = b * b * b, b1 = 3 * t * b * b, b2 = 3 * t * t * b, b3 = t * t * t;
+      const tmp = [
+        pts[first + i][0] - (p0[0] * (b0 + b1) + p3[0] * (b2 + b3)),
+        pts[first + i][1] - (p0[1] * (b0 + b1) + p3[1] * (b2 + b3))
+      ];
+      X0 += V.dot(a0, tmp); X1 += V.dot(a1, tmp);
+    }
+    const det = C00 * C11 - C01 * C01;
+    let aL = det ? (X0 * C11 - X1 * C01) / det : 0;
+    let aR = det ? (C00 * X1 - C01 * X0) / det : 0;
+    const segLen = V.len(V.sub(p3, p0));
+    // degenerate/ill-conditioned fits explode the control arms and the
+    // curve sweeps far off its points — clamp to sane pen-tool proportions
+    if (!isFinite(aL) || !isFinite(aR) ||
+        aL < 1e-6 * segLen || aR < 1e-6 * segLen ||
+        aL > 2 * segLen || aR > 2 * segLen) aL = aR = segLen / 3;
+    return [p0, V.add(p0, V.scale(tHat1, aL)), V.add(p3, V.scale(tHat2, aR)), p3];
+  }
+
+  function maxFitError(pts, first, last, bez, u) {
+    let maxDist = 0, splitPoint = (first + last) >> 1;
+    for (let i = first + 1; i < last; i++) {
+      const p = bezierPoint(bez, u[i - first]);
+      const d = (p[0] - pts[i][0]) ** 2 + (p[1] - pts[i][1]) ** 2;
+      if (d > maxDist) { maxDist = d; splitPoint = i; }
+    }
+    return { maxDist, splitPoint };
+  }
+
+  function newtonStep(bez, p, u) { // move u toward the closest curve point
+    const q1 = [], q2 = [];
+    for (let i = 0; i < 3; i++) q1.push([(bez[i + 1][0] - bez[i][0]) * 3, (bez[i + 1][1] - bez[i][1]) * 3]);
+    for (let i = 0; i < 2; i++) q2.push([(q1[i + 1][0] - q1[i][0]) * 2, (q1[i + 1][1] - q1[i][1]) * 2]);
+    const d = bezierPoint(bez, u), d1 = bezierPoint(q1, u), d2 = bezierPoint(q2, u);
+    const num = (d[0] - p[0]) * d1[0] + (d[1] - p[1]) * d1[1];
+    const den = d1[0] ** 2 + d1[1] ** 2 + (d[0] - p[0]) * d2[0] + (d[1] - p[1]) * d2[1];
+    const nu = den ? u - num / den : u;
+    return nu < 0 ? 0 : nu > 1 ? 1 : nu;
+  }
+
+  // tHat1/tHat2 point INWARD from each end (Schneider's convention)
+  function fitCubic(pts, first, last, tHat1, tHat2, tol, out, depth) {
+    if (last - first === 1) {
+      const p0 = pts[first], p3 = pts[last];
+      const d = V.len(V.sub(p3, p0)) / 3;
+      out.push([p0, V.add(p0, V.scale(tHat1, d)), V.add(p3, V.scale(tHat2, d)), p3]);
+      return;
+    }
+    let u = [0], total = 0;
+    for (let i = first + 1; i <= last; i++) {
+      total += V.len(V.sub(pts[i], pts[i - 1]));
+      u.push(total);
+    }
+    u = u.map(v => v / (total || 1));
+    let bez = generateBezier(pts, first, last, u, tHat1, tHat2);
+    let { maxDist, splitPoint } = maxFitError(pts, first, last, bez, u);
+    if (maxDist < tol * tol) { out.push(bez); return; }
+    if (maxDist < tol * tol * 16) { // close: re-parameterize a few times
+      for (let it = 0; it < 4; it++) {
+        u = u.map((uu, i) => newtonStep(bez, pts[first + i], uu));
+        bez = generateBezier(pts, first, last, u, tHat1, tHat2);
+        ({ maxDist, splitPoint } = maxFitError(pts, first, last, bez, u));
+        if (maxDist < tol * tol) { out.push(bez); return; }
+      }
+    }
+    if (depth > 24) { out.push(bez); return; }
+    if (splitPoint <= first) splitPoint = first + 1;
+    if (splitPoint >= last) splitPoint = last - 1;
+    // window the joint tangent: ±1 pixel neighbors quantize it to 45° steps
+    const k1 = Math.min(4, splitPoint - first), k2 = Math.min(4, last - splitPoint);
+    const tCenter = V.norm(V.sub(pts[splitPoint - k1], pts[splitPoint + k2]));
+    fitCubic(pts, first, splitPoint, tHat1, tCenter, tol, out, depth + 1);
+    fitCubic(pts, splitPoint, last, V.scale(tCenter, -1), tHat2, tol, out, depth + 1);
+  }
+
+  // Full chain -> few cubic segments. Splits at real corners (sharp turns)
+  // so an "L" stays sharp while arcs become single flowing curves.
+  function fitChain(points, closed, tol) {
+    const pts = [];
+    for (const p of points)
+      if (!pts.length || (p[0] - pts[pts.length - 1][0]) ** 2 + (p[1] - pts[pts.length - 1][1]) ** 2 > 1e-12)
+        pts.push(p);
+    if (closed && pts.length > 2) {
+      const f = pts[0], l = pts[pts.length - 1];
+      if ((f[0] - l[0]) ** 2 + (f[1] - l[1]) ** 2 < 1e-12) pts.pop();
+    }
+    const n = pts.length;
+    if (n < 2) return [];
+    const segs = [];
+    const fitArc = (arr, t1, t2) => {
+      const last = arr.length - 1;
+      if (last < 1) return;
+      // straight-line detection: if every point sits on the chord, this is
+      // a ruler line — emit a 2-anchor segment with no handles instead of
+      // a cubic that swivels with skeleton jitter
+      const p0 = arr[0], p1 = arr[last];
+      const chord = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+      if (chord > 4) {
+        const inv = 1 / chord;
+        const dx = (p1[0] - p0[0]) * inv, dy = (p1[1] - p0[1]) * inv;
+        let maxD = 0;
+        for (let i = 1; i < last; i++) {
+          const d = Math.abs(dy * (arr[i][0] - p0[0]) - dx * (arr[i][1] - p0[1]));
+          if (d > maxD) maxD = d;
+        }
+        if (maxD <= Math.max(1.5, tol * 0.9)) {
+          const a = p0.slice(), b = p1.slice();
+          // snap almost-horizontal/vertical ruler lines exactly straight
+          if (Math.abs(b[1] - a[1]) <= Math.max(2, chord * 0.012)) {
+            a[1] = b[1] = (a[1] + b[1]) / 2;
+          } else if (Math.abs(b[0] - a[0]) <= Math.max(2, chord * 0.012)) {
+            a[0] = b[0] = (a[0] + b[0]) / 2;
+          }
+          segs.push({ line: [a, b] });
+          return;
+        }
+      }
+      const k = Math.max(1, Math.min(10, Math.floor(last / 4) || 1));
+      fitCubic(arr, 0, last,
+        t1 || V.norm(V.sub(arr[k], arr[0])),
+        t2 || V.norm(V.sub(arr[last - k], arr[last])),
+        tol, segs, 0);
+    };
+
+    // interior extreme points (leftmost/rightmost/top/bottom of the arc):
+    // pen-tool convention puts anchors exactly there, with H/V handles
+    function findExtremes(arr) {
+      const m = arr.length;
+      const ww = Math.max(2, Math.min(8, m >> 3));
+      const found = [];
+      for (let axis = 0; axis < 2; axis++) {
+        let prevSign = 0, lastAt = -1e9;
+        for (let i = ww; i < m - ww; i++) {
+          const d = arr[i + ww][axis] - arr[i - ww][axis];
+          const s = d > 0.5 ? 1 : d < -0.5 ? -1 : 0;
+          if (!s) continue;
+          if (prevSign && s !== prevSign) {
+            let bi = i; // refine to the actual extreme near the sign change
+            for (let k = Math.max(1, i - ww); k <= Math.min(m - 2, i + ww); k++)
+              if (prevSign > 0 ? arr[k][axis] > arr[bi][axis] : arr[k][axis] < arr[bi][axis]) bi = k;
+            if (bi > ww && bi < m - 1 - ww && bi - lastAt > ww * 2) {
+              const other = 1 - axis;
+              const dir = Math.sign(
+                arr[Math.min(m - 1, bi + ww)][other] - arr[Math.max(0, bi - ww)][other]) || 1;
+              found.push({ i: bi, axis, dir });
+              lastAt = bi;
+            }
+          }
+          prevSign = s;
+        }
+      }
+      found.sort((a, b) => a.i - b.i);
+      const out = [];
+      for (const e of found)
+        if (!out.length || e.i - out[out.length - 1].i > ww) out.push(e);
+      // prominence gate: an extreme only earns an anchor when its wave is
+      // bigger than the fit tolerance — sub-width wobble stays smoothed out
+      const minProm = Math.max(1.5, tol * 1.2);
+      return out.filter((e, k) => {
+        const prevI = k === 0 ? 0 : out[k - 1].i;
+        const nextI = k === out.length - 1 ? m - 1 : out[k + 1].i;
+        const v = arr[e.i][e.axis];
+        return Math.min(Math.abs(v - arr[prevI][e.axis]),
+                        Math.abs(v - arr[nextI][e.axis])) >= minProm;
+      });
+    }
+
+    // fit an arc, splitting at extremes with forced horizontal/vertical
+    // tangents so anchors land where a designer would put them
+    const fitSpan = (arr, t1, t2) => {
+      if (arr.length < 16) { fitArc(arr, t1, t2); return; }
+      const ex = findExtremes(arr);
+      if (!ex.length) { fitArc(arr, t1, t2); return; }
+      let start = 0, tIn = t1;
+      for (const e of ex) {
+        const tang = e.axis === 0 ? [0, e.dir] : [e.dir, 0]; // travel direction
+        fitArc(arr.slice(start, e.i + 1), tIn, [-tang[0], -tang[1]]);
+        tIn = tang;
+        start = e.i;
+      }
+      fitArc(arr.slice(start), tIn, t2);
+    };
+
+    // a closed loop that measures as an axis-aligned circle/ellipse becomes
+    // a mathematically perfect one: 4 anchors at the cardinal points
+    function ellipseSnap(ptsArr) {
+      const m = ptsArr.length;
+      if (m < 24) return null;
+      let minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+      for (const p of ptsArr) {
+        if (p[0] < minX) minX = p[0];
+        if (p[0] > maxX) maxX = p[0];
+        if (p[1] < minY) minY = p[1];
+        if (p[1] > maxY) maxY = p[1];
+      }
+      const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+      const rx0 = (maxX - minX) / 2, ry0 = (maxY - minY) / 2;
+      if (rx0 < 4 || ry0 < 4) return null;
+      // median radii: robust against the minority of points dented inward
+      // by junction bridges (e.g. where meridians fuse into a globe's rim)
+      const rxs = [], rys = [];
+      for (const p of ptsArr) {
+        const ang = Math.atan2((p[1] - cy) / ry0, (p[0] - cx) / rx0);
+        const co = Math.cos(ang), si = Math.sin(ang);
+        if (Math.abs(co) > 0.45) rxs.push(Math.abs((p[0] - cx) / co));
+        if (Math.abs(si) > 0.45) rys.push(Math.abs((p[1] - cy) / si));
+      }
+      if (rxs.length < 8 || rys.length < 8) return null;
+      rxs.sort((a, b) => a - b);
+      rys.sort((a, b) => a - b);
+      const rx = rxs[rxs.length >> 1], ry = rys[rys.length >> 1];
+      const meanR = (rx + ry) / 2;
+      const devs = [];
+      for (const p of ptsArr)
+        devs.push(Math.abs(Math.hypot((p[0] - cx) / rx, (p[1] - cy) / ry) - 1) * meanR);
+      devs.sort((a, b) => a - b);
+      // 80th-percentile gate: the ring is judged by its healthy majority —
+      // snapping then CORRECTS the junction-dented minority to the circle
+      if (devs[Math.floor(devs.length * 0.8)] > Math.max(1.5, tol, meanR * 0.015)) return null;
+      const kx = 0.5522847498 * rx, ky = 0.5522847498 * ry;
+      return [
+        [[cx, cy - ry], [cx + kx, cy - ry], [cx + rx, cy - ky], [cx + rx, cy]],
+        [[cx + rx, cy], [cx + rx, cy + ky], [cx + kx, cy + ry], [cx, cy + ry]],
+        [[cx, cy + ry], [cx - kx, cy + ry], [cx - rx, cy + ky], [cx - rx, cy]],
+        [[cx - rx, cy], [cx - rx, cy - ky], [cx - kx, cy - ry], [cx, cy - ry]]
+      ];
+    }
+
+    if (n === 2) { fitArc(pts); return segs; }
+
+    // corner detection: direction change measured across a window. The
+    // window scales with the fit tolerance (~stroke width) so it spans the
+    // rounded zone left by polyline smoothing and staircase steps alike.
+    const w = Math.max(2, Math.min(30, Math.round(Math.max(6, tol * 4)), n >> 3));
+    const turn = i => {
+      const a = closed ? pts[(i - w + n) % n] : pts[Math.max(0, i - w)];
+      const b = pts[i];
+      const c = closed ? pts[(i + w) % n] : pts[Math.min(n - 1, i + w)];
+      let da = Math.atan2(c[1] - b[1], c[0] - b[0]) - Math.atan2(b[1] - a[1], b[0] - a[0]);
+      while (da > Math.PI) da -= 2 * Math.PI;
+      while (da < -Math.PI) da += 2 * Math.PI;
+      return Math.abs(da);
+    };
+    const corners = [];
+    const from = closed ? 0 : w, to = closed ? n : n - w;
+    for (let i = from; i < to; i++) {
+      const t = turn(i);
+      if (t < 0.95) continue; // < ~54°: a curve, not a corner (smoothing dilutes real corners)
+      let isMax = true;
+      for (let k = 1; k <= w && isMax; k++) {
+        const ir = closed ? (i + k) % n : Math.min(n - 1, i + k);
+        const il = closed ? (i - k + n) % n : Math.max(0, i - k);
+        if (turn(ir) > t || turn(il) >= t) isMax = false;
+      }
+      if (isMax) corners.push(i);
+    }
+
+    if (!closed) {
+      if (!corners.length) fitSpan(pts);
+      else {
+        const cuts = [0, ...corners, n - 1];
+        for (let i = 0; i + 1 < cuts.length; i++)
+          fitSpan(pts.slice(cuts[i], cuts[i + 1] + 1));
+      }
+    } else if (corners.length >= 2) {
+      for (let i = 0; i < corners.length; i++) {
+        const a = corners[i], b = corners[(i + 1) % corners.length];
+        fitSpan(a < b ? pts.slice(a, b + 1) : pts.slice(a).concat(pts.slice(0, b + 1)));
+      }
+    } else if (corners.length === 1) {
+      const a = corners[0];
+      fitSpan(pts.slice(a).concat(pts.slice(0, a + 1)));
+    } else {
+      // smooth closed loop: perfect circle/ellipse when it measures as one
+      const snapped = ellipseSnap(pts);
+      if (snapped) return snapped;
+      // otherwise rotate the ring to its top point and fit from there, so
+      // the seam anchor sits at an extreme with a horizontal handle
+      let top = 0;
+      for (let i = 1; i < n; i++) if (pts[i][1] < pts[top][1]) top = i;
+      const ww = Math.max(2, Math.min(8, n >> 3));
+      const dir = Math.sign(pts[(top + ww) % n][0] - pts[(top - ww + n) % n][0]) || 1;
+      const rot = pts.slice(top).concat(pts.slice(0, top), [pts[top]]);
+      fitSpan(rot, [dir, 0], [-dir, 0]);
+    }
+    return segs;
+  }
+
+  // path data; single points render as dots, smooth chains as fitted curves
+  function chainToPathData(chain, smooth, tol) {
+    const p = chain.points, n = p.length;
+    if (n === 0) return '';
+    if (n === 1) return `M ${fmt(p[0][0])} ${fmt(p[0][1])} l 0.01 0`;
+    if (smooth && n >= 3) {
+      const segs = fitChain(p, !!chain.closed, tol || 1.5);
+      if (segs.length) {
+        const start = segs[0].line ? segs[0].line[0] : segs[0][0];
+        let d = `M ${fmt(start[0])} ${fmt(start[1])}`;
+        for (const s of segs) {
+          if (s.line) d += ` L ${fmt(s.line[1][0])} ${fmt(s.line[1][1])}`;
+          else d += ` C ${fmt(s[1][0])} ${fmt(s[1][1])} ${fmt(s[2][0])} ${fmt(s[2][1])} ${fmt(s[3][0])} ${fmt(s[3][1])}`;
+        }
+        if (chain.closed) d += ' Z';
+        return d;
+      }
+    }
+    let d = `M ${fmt(p[0][0])} ${fmt(p[0][1])}`;
+    for (let i = 1; i < n; i++) d += ` L ${fmt(p[i][0])} ${fmt(p[i][1])}`;
+    if (chain.closed) d += ' Z';
+    return d;
+  }
+
+  // Width-scaled polyline smoothing (double box blur ~ Gaussian), applied
+  // before curve fitting — the standard vectorization step that removes
+  // staircase zigzag from upscaled sources and edge-roughness oscillation.
+  // Endpoints stay pinned so junction connections are preserved.
+  function smoothChain(points, closed, radius) {
+    const n = points.length;
+    const r = Math.max(1, Math.min(12, Math.round(radius)));
+    if (n < 2 * r + 3) return points;
+    let pts = points;
+    for (let pass = 0; pass < 2; pass++) {
+      const out = new Array(n);
+      for (let i = 0; i < n; i++) {
+        let rr = r;
+        if (!closed) rr = Math.min(r, i, n - 1 - i); // taper at open ends
+        if (rr === 0) { out[i] = pts[i]; continue; }
+        let sx = 0, sy = 0, c = 0;
+        for (let k = -rr; k <= rr; k++) {
+          const j = closed ? ((i + k) % n + n) % n : i + k;
+          sx += pts[j][0];
+          sy += pts[j][1];
+          c++;
+        }
+        out[i] = [sx / c, sy / c];
+      }
+      pts = out;
+    }
+    return pts;
+  }
+
+  // Group chains into weight classes. Tight tolerance (25% + 0.6px cushion
+  // for quantization at small widths) so every line renders very close to
+  // its measured thickness; capped at 6 classes.
+  function bucketChains(kept) {
+    const buckets = [];
+    for (const c of kept.slice().sort((a, b) => a.width - b.width)) {
+      const b = buckets[buckets.length - 1];
+      if (b && c.width <= b.minW * 1.25 + 0.6) { b.chains.push(c); b.maxW = c.width; }
+      else buckets.push({ chains: [c], minW: c.width, maxW: c.width });
+    }
+    while (buckets.length > 6) {
+      let bi = 0, best = Infinity;
+      for (let i = 0; i + 1 < buckets.length; i++) {
+        const gap = buckets[i + 1].minW / buckets[i].maxW;
+        if (gap < best) { best = gap; bi = i; }
+      }
+      buckets[bi].chains.push(...buckets[bi + 1].chains);
+      buckets[bi].maxW = buckets[bi + 1].maxW;
+      buckets.splice(bi + 1, 1);
+    }
+    for (const b of buckets) {
+      let ws = 0, ls = 0;
+      for (const c of b.chains) { ws += c.width * c.geomLength; ls += c.geomLength; }
+      b.width = ls ? ws / ls : b.minW;
+    }
+    return buckets;
+  }
+
+  // chains -> final SVG. strokeWidth is the desired *average* weight in
+  // output px (thickness scaling); per-chain widths stay proportional.
+  function buildSvg(chains, w, h, opts) {
+    const o = Object.assign({
+      simplify: 1, smooth: true, minLength: 4,
+      stroke: '#000000', strokeWidth: 2, outW: w, outH: h,
+      matchWeights: true, avgWidth: 0
+    }, opts || {});
+    const kept = [];
+    for (const c of chains) {
+      const len = c.geomLength != null ? c.geomLength : c.points.length;
+      // tiny closed rings (circumference ~ line width) are skeleton knots at
+      // thick junctions, not drawn loops
+      if (o.minLength > 0 && c.closed && c.width != null && len < 3.5 * c.width) continue;
+      const bothFree = !c.endDeg || (c.endDeg[0] <= 2 && c.endDeg[1] <= 2);
+      // roundish isolated blobs (stitch dots): direction is meaningless —
+      // render a dot, not a randomly angled tick
+      if (!c.closed && bothFree && c.width != null && len < 1.3 * c.width) {
+        if (c.width < Math.max(1, o.minLength)) continue; // speckle: dot diameter
+        if (c.debris && o.minLength > 0) continue; // fragment shaved off a line
+        let cx = 0, cy = 0;
+        for (const p of c.points) { cx += p[0]; cy += p[1]; }
+        kept.push({
+          closed: false,
+          points: [[cx / c.points.length, cy / c.points.length]],
+          width: c.width, geomLength: Math.max(len, 1)
+        });
+        continue;
+      }
+      if (c.points.length < Math.max(1, o.minLength)) continue;
+      if (o.minLength > 0 && !c.closed && c.endDeg && c.width != null) {
+        const a0 = c.endDeg[0] > 2, a1 = c.endDeg[1] > 2;
+        if (a0 !== a1) {
+          // dead-end hair off a junction. Aggressive pruning only when it
+          // hangs off a clearly THICKER line (poke/bridge artifact) — a
+          // same-width junction means it's a fragment of the line itself.
+          // Caps scale with the junction size: fat strokes grow fat nubs.
+          const jw = c.endWidths ? c.endWidths[a0 ? 0 : 1] : c.width;
+          const lim = jw > c.width * 1.6
+            ? Math.max(1.5 * c.width, 2.2 * jw)
+            : 1.5 * c.width + 2;
+          if (len < Math.min(Math.max(32, jw * 2.4), lim)) continue;
+        } else if (a0 && a1) {
+          const ew = c.endWidths || [c.width, c.width];
+          // shorter than its two junction blobs combined = lives entirely
+          // inside the fused ink, pure skeleton remnant
+          if (len < ((ew[0] + 1) / 2 + (ew[1] + 1) / 2) * 0.9) continue;
+          const jw = Math.max(ew[0], ew[1]);
+          const stubLim = jw > c.width * 1.6
+            ? Math.max(20, 2 * jw)          // remnant inside a fat fusion zone
+            : Math.min(20, 1.5 * c.width);  // real short connector (H crossbar)
+          if (len < stubLim) continue;
+        }
+      }
+      // width-adaptive tolerance: wiggles that are detail on a 2px line are
+      // centerline noise on a 14px stroke
+      const eps = o.simplify > 0
+        ? Math.max(o.simplify, Math.min(12, (c.width || 1) * 0.35))
+        : o.simplify;
+      let s;
+      if (o.smooth) {
+        // smooth the polyline (width-scaled) before fitting, then fit
+        s = {
+          closed: c.closed,
+          points: smoothChain(c.points, !!c.closed, (c.width || 2) * 0.4),
+          fitTol: Math.max(0.75, eps)
+        };
+      } else {
+        s = simplifyChain(c, eps);
+      }
+      s.width = c.width;
+      s.geomLength = len;
+      kept.push(s);
+    }
+    const toViewBox = w / o.outW;
+    let paths;
+    if (o.matchWeights && o.avgWidth > 0 && kept.length && kept.every(c => c.width != null)) {
+      paths = bucketChains(kept).sort((a, b) => b.width - a.width).map(b => ({
+        d: b.chains.map(c => chainToPathData(c, o.smooth, c.fitTol)).join(' '),
+        width: b.width / o.avgWidth * o.strokeWidth
+      }));
+    } else {
+      paths = [{
+        d: kept.map(c => chainToPathData(c, o.smooth, c.fitTol)).join(' '),
+        width: o.strokeWidth
+      }];
+    }
+    const body = paths.map(p =>
+      `<path d="${p.d}" fill="none" stroke="${o.stroke}" ` +
+      `stroke-width="${fmt(Math.max(0.05, p.width * toViewBox))}" ` +
+      `stroke-linecap="round" stroke-linejoin="round"/>`).join('');
+    const svg =
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${fmt(o.outW)}" height="${fmt(o.outH)}" ` +
+      `viewBox="0 0 ${w} ${h}">${body}</svg>`;
+    return {
+      svg,
+      pathCount: kept.length,
+      // anchor points in the final geometry (M/C/L commands), not raw samples
+      pointCount: paths.reduce((s, p) => s + (p.d.match(/[MCL]/g) || []).length, 0),
+      weights: paths.map(p => Math.round(p.width * 100) / 100)
+    };
+  }
+
+  // Full automatic pipeline: image -> merged, measured chains + the values
+  // needed to reproduce the source look (average weight, ink color).
+  function trace(img, opts) {
+    const o = opts || {};
+    const auto = analyze(img);
+    const mode = !o.mode || o.mode === 'auto' ? auto.mode : o.mode;
+    let threshold, bin, skel, preprocess = 'none';
+    if (o.threshold != null) {
+      threshold = o.threshold;
+      bin = fillHoles(binarize(img, threshold, mode), img.width, img.height);
+      skel = thin(bin, img.width, img.height);
+    } else {
+      // Two things are auto-tuned by skeleton-topology score (long skeleton,
+      // few junctions = fused lines, few endpoints = broken lines):
+      //  - the ink threshold (Otsu alone fuses nearly-touching lines), and
+      //  - whether to denoise first (blur before binarizing cleans rough
+      //    low-quality sources but would fuse crisp fine detail — so it
+      //    only wins when the measured topology says it helps).
+      const ladder = base => {
+        const strictness = f => mode === 'dark'
+          ? Math.round(base * f)
+          : Math.round(255 - (255 - base) * f);
+        return mode === 'alpha'
+          ? [base]
+          : [...new Set([1, 0.85, 0.7, 0.55].map(f =>
+              Math.max(15, Math.min(254, strictness(f)))))];
+      };
+      // rank candidates on a half-scale proxy (thinning is the hot path and
+      // the topology ORDERING is preserved), then thin only the winner at
+      // full resolution
+      let proxy = img;
+      if (img.width * img.height > 1400 * 1400) {
+        const pw = img.width >> 1, ph = img.height >> 1;
+        const pd = new Uint8ClampedArray(pw * ph * 4);
+        for (let y = 0; y < ph; y++) {
+          for (let x = 0; x < pw; x++) {
+            const s0 = (y * 2 * img.width + x * 2) * 4;
+            const s1 = s0 + 4, s2 = s0 + img.width * 4, s3 = s2 + 4;
+            const d = (y * pw + x) * 4;
+            for (let ch = 0; ch < 4; ch++)
+              pd[d + ch] = (img.data[s0 + ch] + img.data[s1 + ch] + img.data[s2 + ch] + img.data[s3 + ch]) / 4;
+          }
+        }
+        proxy = { width: pw, height: ph, data: pd };
+      }
+      const variants = [
+        { key: 'none', img: proxy },
+        { key: 'blur', img: boxBlurRGBA(proxy, proxy === img ? 2 : 1) }
+      ];
+      const bests = {};
+      for (const v of variants) {
+        // blurring shifts the histogram — each variant gets thresholds from
+        // its OWN Otsu, or a strict ladder shrinks blurred ink around holes
+        const base = v.key === 'none' ? auto.threshold : analyze(v.img).threshold;
+        for (const t of ladder(base)) {
+          const b = fillHoles(binarize(v.img, t, mode), proxy.width, proxy.height);
+          const s = thin(b, proxy.width, proxy.height);
+          const st = topoStats(s, proxy.width, proxy.height);
+          if (!bests[v.key] || st.score > bests[v.key].score) bests[v.key] = { t, v: v.key, score: st.score };
+        }
+      }
+      // topology can't see fidelity (dissolved detail also 'cleans' the
+      // skeleton), so denoising must win clearly, not on a tie. Measured
+      // margins: fine-detail art scores ~1.03x under blur (must reject),
+      // genuinely noisy sources ~1.2x+ (must accept) — gate between them.
+      const best = bests.blur && bests.blur.score > bests.none.score * 1.1 + 50
+        ? bests.blur : bests.none;
+      threshold = best.t;
+      trace.lastTuning = bests; // diagnostics for tests/debugging
+      preprocess = best.v;
+      const srcImg = preprocess === 'blur' ? boxBlurRGBA(img, 2) : img;
+      bin = fillHoles(binarize(srcImg, threshold, mode), img.width, img.height);
+      skel = thin(bin, img.width, img.height);
+    }
+    let chains = extractChains(skel, img.width, img.height);
+
+    const dist = distanceTransform(bin, img.width, img.height);
+    for (const c of chains) {
+      const samples = [];
+      let glen = 0;
+      for (let k = 0; k < c.points.length; k++) {
+        const p = c.points[k];
+        samples.push(dist[(p[1] - 0.5) * img.width + (p[0] - 0.5)]);
+        if (k) glen += Math.hypot(p[0] - c.points[k - 1][0], p[1] - c.points[k - 1][1]);
+      }
+      const first = samples[0], last = samples[samples.length - 1];
+      c._pw = samples.map(s => Math.max(1, 2 * s / 3 - 1)); // per-point widths
+      samples.sort((a, b) => a - b);
+      const radius = samples[samples.length >> 1] / 3;
+      c.width = Math.max(1, 2 * radius - 1);
+      c.endWidths = [Math.max(1, 2 * first / 3 - 1), Math.max(1, 2 * last / 3 - 1)];
+      c.geomLength = glen;
+    }
+
+    // Trim chain ends back out of junction blobs: where strokes cross, the
+    // ink is locally much wider and the skeleton wanders, bending every
+    // line entering the junction. Each trimmed end remembers the junction
+    // point so merging can bridge through it cleanly.
+    for (const c of chains) {
+      if (c.closed || !c.endDeg) { delete c._pw; continue; }
+      c.trim = [null, null];
+      for (const e of [0, 1]) {
+        if (c.endDeg[e] <= 2 || c.points.length < 6) continue;
+        const jr = ((c.endWidths ? c.endWidths[e] : c.width) + 1) / 2;
+        const minTrim = jr * 1.15;
+        if (c.geomLength < minTrim * 2.5) continue;
+        // keep trimming while the ink is still fused (wider than the line
+        // itself) — tangential merges fuse far beyond the junction radius
+        const wLimit = Math.max(c.width * 1.35, c.width + 2);
+        const maxTrim = Math.min(c.geomLength * 0.35, jr * 8);
+        const jp = e === 0 ? c.points[0] : c.points[c.points.length - 1];
+        let acc = 0, cut = 0, clear = 0;
+        const n = c.points.length;
+        while (cut + 3 < n && acc < maxTrim) {
+          const i = e === 0 ? cut : n - 1 - cut;
+          if (acc >= minTrim && c._pw[i] <= wLimit) {
+            if (++clear >= 3) break;
+          } else clear = 0;
+          const a = e === 0 ? c.points[cut] : c.points[n - 1 - cut];
+          const b = e === 0 ? c.points[cut + 1] : c.points[n - 2 - cut];
+          acc += Math.hypot(b[0] - a[0], b[1] - a[1]);
+          cut++;
+        }
+        cut = Math.max(0, cut - clear);
+        if (!cut) continue;
+        if (e === 0) {
+          c.points = c.points.slice(cut);
+          c._pw = c._pw.slice(cut);
+        } else {
+          c.points = c.points.slice(0, c.points.length - cut);
+          c._pw = c._pw.slice(0, c._pw.length - cut);
+        }
+        c.geomLength = Math.max(1, c.geomLength - acc);
+        c.trim[e] = { p: jp, r: jr };
+      }
+      delete c._pw;
+    }
+
+    // isolated blobs sitting right next to other ink are debris shaved off
+    // a line, not stitch dots — flag them (checked on a ring around each)
+    for (const c of chains) {
+      if (c.closed || c.geomLength >= 1.3 * c.width) continue;
+      if (c.endDeg && (c.endDeg[0] > 2 || c.endDeg[1] > 2)) continue;
+      let cx = 0, cy = 0;
+      for (const p of c.points) { cx += p[0]; cy += p[1]; }
+      cx /= c.points.length; cy /= c.points.length;
+      const R = c.width * 1.2 + 2;
+      let hits = 0;
+      for (let a = 0; a < 16; a++) {
+        const x = Math.round(cx + R * Math.cos(a * Math.PI / 8));
+        const y = Math.round(cy + R * Math.sin(a * Math.PI / 8));
+        if (x >= 0 && x < img.width && y >= 0 && y < img.height && bin[y * img.width + x]) hits++;
+      }
+      if (hits >= 3) c.debris = true;
+    }
+
+    chains = mergeChains(chains);
+
+    const total = img.width * img.height;
+    let inkCount = 0, skelCount = 0, r = 0, g = 0, b = 0;
+    for (let i = 0; i < total; i++) {
+      if (bin[i]) inkCount++;
+      if (skel[i]) { // line centers: color unaffected by AA edge pixels
+        skelCount++;
+        const p = i * 4;
+        r += img.data[p]; g += img.data[p + 1]; b += img.data[p + 2];
+      }
+    }
+    const avgStrokeWidth = skelCount ? Math.max(1, inkCount / skelCount) : 2;
+    const toHex = v => Math.round(v / (skelCount || 1)).toString(16).padStart(2, '0');
+    const inkColor = skelCount ? '#' + toHex(r) + toHex(g) + toHex(b) : '#000000';
+
+    return { chains, width: img.width, height: img.height, mode, threshold, preprocess, avgStrokeWidth, inkColor };
+  }
+
+  return {
+    analyze, binarize, thin, extractChains, mergeChains, simplifyChain,
+    chainToPathData, buildSvg, trace, rdp, otsu, distanceTransform, bucketChains
+  };
+})();
+if (typeof module !== 'undefined' && module.exports) module.exports = LineTracer;
+/* ===== TRACER-END ===== */
+</script>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const dropzone = $('dropzone'), fileInput = $('fileInput');
+  const srcImg = $('srcImg'), traceImg = $('traceImg');
+  const actions = $('actions'), status = $('status');
+
+  const state = {
+    image: null,
+    name: 'Line trace',
+    exportScale: 1,   // selection exports come in upscaled; divide back out
+    traced: null,
+    svg: null,
+    lastBlobUrl: null
+  };
+
+  function syncHeight() {
+    setTimeout(() => {
+      const h = Math.min(740, document.documentElement.scrollHeight + 8);
+      parent.postMessage({ pluginMessage: { type: 'ui-resize', height: h } }, '*');
+    }, 30);
+  }
+
+  // ---------- image loading ----------
+  function loadBlob(blob, name, exportScale) {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      state.image = img;
+      state.name = name || 'Line trace';
+      state.exportScale = exportScale || 1;
+      $('thickness').value = 100;
+      $('thicknessOut').textContent = '100%';
+      srcImg.src = url;
+      dropzone.classList.add('has-image');
+      actions.style.display = 'flex';
+      $('thicknessRow').classList.add('visible');
+      syncHeight();
+      retrace();
+    };
+    img.onerror = () => setStatus('Could not read that image.', true);
+    img.src = url;
+  }
+
+  fileInput.onchange = () => fileInput.files[0] && loadBlob(fileInput.files[0], fileInput.files[0].name.replace(/\.[^.]+$/, ''));
+  $('openBtn').onclick = () => fileInput.click();
+  dropzone.onclick = () => { if (!state.image) fileInput.click(); };
+
+  dropzone.ondragover = e => { e.preventDefault(); dropzone.classList.add('dragover'); };
+  dropzone.ondragleave = () => dropzone.classList.remove('dragover');
+  dropzone.ondrop = e => {
+    e.preventDefault();
+    dropzone.classList.remove('dragover');
+    const f = e.dataTransfer.files[0];
+    if (f && f.type.startsWith('image/')) loadBlob(f, f.name.replace(/\.[^.]+$/, ''));
+  };
+
+  document.onpaste = e => {
+    for (const item of e.clipboardData.items) {
+      if (item.type.startsWith('image/')) {
+        loadBlob(item.getAsFile(), 'Pasted image');
+        return;
+      }
+    }
+  };
+
+  $('selBtn').onclick = () => {
+    setStatus('Exporting selected layer…');
+    parent.postMessage({ pluginMessage: { type: 'get-selection-image' } }, '*');
+  };
+
+  window.onmessage = e => {
+    const msg = e.data.pluginMessage;
+    if (!msg) return;
+    if (msg.type === 'selection-state') {
+      $('selBtn').disabled = !msg.hasSelection;
+    } else if (msg.type === 'selection-image') {
+      if (msg.error) { setStatus(msg.error, true); return; }
+      loadBlob(new Blob([msg.bytes], { type: 'image/png' }), msg.name, msg.scale);
+    }
+  };
+
+  // ---------- tracing (fully automatic) ----------
+  function getImageData() {
+    const img = state.image;
+    // trace at up to 2x the native size: bicubic upsampling turns sub-pixel
+    // gaps between near-touching lines (stitch dashes hugging a seam) into
+    // resolvable gray gradients the threshold can separate
+    const nat = Math.max(img.naturalWidth, img.naturalHeight);
+    const scale = Math.min(2600, nat * 2) / nat;
+    const w = Math.max(2, Math.round(img.naturalWidth * scale));
+    const h = Math.max(2, Math.round(img.naturalHeight * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, w, h);
+    return ctx.getImageData(0, 0, w, h);
+  }
+
+  function retrace() {
+    if (!state.image) return;
+    setStatus('Tracing…');
+    setTimeout(() => { // let the status paint before blocking
+      const t0 = performance.now();
+      try {
+        state.traced = LineTracer.trace(getImageData(), {});
+        render(performance.now() - t0);
+      } catch (err) {
+        setStatus('Trace failed: ' + err.message, true);
+      }
+    }, 30);
+  }
+
+  function render(traceMs) {
+    if (!state.traced) return;
+    const t = state.traced;
+    const outW = state.image.naturalWidth / state.exportScale;
+    const outH = state.image.naturalHeight / state.exportScale;
+    const thickness = (+$('thickness').value || 100) / 100;
+    const { svg, pathCount, pointCount, weights } = LineTracer.buildSvg(t.chains, t.width, t.height, {
+      simplify: 1,
+      smooth: true,
+      minLength: 3,
+      stroke: t.inkColor,
+      strokeWidth: Math.max(0.1, t.avgStrokeWidth * (outW / t.width) * thickness),
+      matchWeights: true,
+      avgWidth: t.avgStrokeWidth,
+      outW, outH
+    });
+    state.svg = svg;
+    if (state.lastBlobUrl) URL.revokeObjectURL(state.lastBlobUrl);
+    state.lastBlobUrl = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+    traceImg.src = state.lastBlobUrl;
+    const modeNames = { dark: 'dark lines', light: 'light lines', alpha: 'transparency' };
+    setStatus(
+      `${pathCount} lines · ${pointCount} anchors · ${weights.length} weight${weights.length > 1 ? 's' : ''}` +
+      (traceMs ? ` · ${Math.round(traceMs)} ms` : '') +
+      ` · <span class="mode">${modeNames[t.mode]}</span>`
+    );
+    $('importBtn').disabled = pathCount === 0;
+    $('copyBtn').disabled = pathCount === 0;
+  }
+
+  function setStatus(html, isError) {
+    status.innerHTML = html;
+    status.style.color = isError ? '#f24822' : '';
+  }
+
+  // ---------- controls ----------
+  $('thickness').addEventListener('input', () => {
+    $('thicknessOut').textContent = $('thickness').value + '%';
+    render();
+  });
+
+  $('importBtn').onclick = () => {
+    if (!state.svg) return;
+    parent.postMessage({ pluginMessage: { type: 'import-svg', svg: state.svg, name: state.name } }, '*');
+  };
+
+  $('copyBtn').onclick = async () => {
+    if (!state.svg) return;
+    try {
+      await navigator.clipboard.writeText(state.svg);
+      setStatus('SVG copied to clipboard.');
+    } catch (_) {
+      const ta = document.createElement('textarea');
+      ta.value = state.svg;
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      setStatus(ok ? 'SVG copied to clipboard.' : 'Copy failed — use Add to canvas instead.', !ok);
+    }
+  };
+})();
+</script>
