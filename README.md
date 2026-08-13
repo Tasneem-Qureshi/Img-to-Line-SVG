@@ -64,6 +64,14 @@ What the automatic pipeline does:
   segments (no curve handles, no swivel), and near-horizontal/vertical
   ruler lines snap exactly straight — a rectangle is 4 corners and 4
   handle-free sides,
+- stroke finishing is measured from the ink: flat line ends become butt
+  caps with the anchor moved to the true ink face (round ends stay round),
+  and sharp corners emit miter joins while soft ones stay round —
+  per weight class, by majority vote of its ends and corners,
+- small/low-res images are upscaled to a ~1400px working resolution
+  (up to 6x) before tracing — a 300px icon traces blocky at 2x but
+  cleanly at 4-5x — and filled dots that survive as tiny remnants are
+  recognized and kept as dots,
 - stroke color is sampled from the line centers.
 
 ## Tips

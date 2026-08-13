@@ -62,6 +62,34 @@ function keptChains(traced, minLength) {
 function endpoints(chain) {
   return [chain.points[0], chain.points[chain.points.length - 1]];
 }
+function fillRect(img, x0, y0, x1, y1, rgba) {
+  for (let y = y0; y < y1; y++)
+    for (let x = x0; x < x1; x++) {
+      const o = (y * img.width + x) * 4;
+      img.data[o] = rgba[0]; img.data[o + 1] = rgba[1];
+      img.data[o + 2] = rgba[2]; img.data[o + 3] = rgba[3];
+    }
+}
+function bilinearResize(img, W, H) {
+  const { width: w, height: h, data } = img;
+  const out = new Uint8ClampedArray(W * H * 4);
+  for (let y = 0; y < H; y++) {
+    const sy = Math.min(h - 1.001, Math.max(0, (y + 0.5) * h / H - 0.5));
+    const y0 = Math.floor(sy), fy = sy - y0, y1 = Math.min(h - 1, y0 + 1);
+    for (let x = 0; x < W; x++) {
+      const sx = Math.min(w - 1.001, Math.max(0, (x + 0.5) * w / W - 0.5));
+      const x0 = Math.floor(sx), fx = sx - x0, x1 = Math.min(w - 1, x0 + 1);
+      for (let ch = 0; ch < 4; ch++) {
+        out[(y * W + x) * 4 + ch] =
+          data[(y0 * w + x0) * 4 + ch] * (1 - fx) * (1 - fy) +
+          data[(y0 * w + x1) * 4 + ch] * fx * (1 - fy) +
+          data[(y1 * w + x0) * 4 + ch] * (1 - fx) * fy +
+          data[(y1 * w + x1) * 4 + ch] * fx * fy;
+      }
+    }
+  }
+  return { width: W, height: H, data: out };
+}
 function parsePath(d) { // -> { anchors, ctrls (null for L segments) }
   const tokens = d.match(/[MLCZ]|-?[\d.]+/g) || [];
   const anchors = [], ctrls = [];
@@ -750,6 +778,84 @@ console.log('25. low-quality icon (fuzz + pepper noise) auto-denoises');
   check('denoise chosen automatically', traced.preprocess === 'blur', `got ${traced.preprocess}`);
   check('clean structure (<= 6 lines)', pathCount <= 6, `got ${pathCount}`);
   check('few anchors (<= 20)', pointCount <= 20, `got ${pointCount}`);
+}
+
+// --- 26. finishing: cap and join styles measured from the ink ---------------
+console.log('26. flat/round caps and miter/round joins detected');
+{
+  // flat-capped bar (filled rectangle) and round-capped bar (disc pen),
+  // each traced alone so the path attribution is unambiguous
+  const traceBar = draw => {
+    const im = makeImage(400, 120, WHITE);
+    draw(im);
+    const tr = T.trace(im, {});
+    const { svg } = T.buildSvg(tr.chains, 400, 120, {
+      minLength: 3, matchWeights: true, avgWidth: tr.avgStrokeWidth,
+      strokeWidth: tr.avgStrokeWidth, ink: tr.ink
+    });
+    const m = svg.match(/<path d="([^"]*)"[^>]*stroke-linecap="([^"]*)"/);
+    const xs = m[1].match(/-?[\d.]+/g).map(Number).filter((_, i) => i % 2 === 0);
+    return { cap: m[2], span: Math.max(...xs) - Math.min(...xs) };
+  };
+  const flat = traceBar(im => fillRect(im, 60, 56, 340, 65, BLACK));
+  const round = traceBar(im => drawSegment(im, 60, 60, 340, 60, 9, BLACK));
+  check('flat bar -> butt cap', flat.cap === 'butt', flat.cap);
+  check('round bar -> round cap', round.cap === 'round', round.cap);
+  check('flat bar reaches its faces', flat.span > 274, `span ${flat.span.toFixed(1)}`);
+
+  // sharp-cornered frame (miter) vs disc-pen rectangle (round joins)
+  const img2 = makeImage(320, 260, WHITE);
+  fillRect(img2, 60, 60, 260, 200, BLACK);
+  fillRect(img2, 69, 69, 251, 191, WHITE); // 9px frame, sharp corners
+  const t2 = T.trace(img2, {});
+  const r2 = T.buildSvg(t2.chains, 320, 260, {
+    minLength: 3, matchWeights: true, avgWidth: t2.avgStrokeWidth,
+    strokeWidth: t2.avgStrokeWidth, ink: t2.ink
+  });
+  check('sharp frame -> miter join', /stroke-linejoin="miter"/.test(r2.svg),
+    (r2.svg.match(/stroke-linejoin="[^"]*"/g) || []).join(' '));
+  const img3 = makeImage(320, 260, WHITE);
+  drawSegment(img3, 60, 60, 260, 60, 9, BLACK);
+  drawSegment(img3, 260, 60, 260, 200, 9, BLACK);
+  drawSegment(img3, 260, 200, 60, 200, 9, BLACK);
+  drawSegment(img3, 60, 200, 60, 60, 9, BLACK);
+  const t3 = T.trace(img3, {});
+  const r3 = T.buildSvg(t3.chains, 320, 260, {
+    minLength: 3, matchWeights: true, avgWidth: t3.avgStrokeWidth,
+    strokeWidth: t3.avgStrokeWidth, ink: t3.ink
+  });
+  check('round-pen rectangle -> round join', !/stroke-linejoin="miter"/.test(r3.svg),
+    (r3.svg.match(/stroke-linejoin="[^"]*"/g) || []).join(' '));
+}
+
+// --- 27. LOW-RES icon: upscale-then-trace keeps it crisp ---------------------
+console.log('27. low-res technical icon (320px) traces sharp, not blobby');
+{
+  // crisp icon drawn small: flat-capped bars, sharp frame corner, wall line,
+  // dots — like a downloaded 300px pictogram
+  const s0 = { width: 320, height: 280, data: null };
+  const img = makeImage(320, 280, WHITE);
+  fillRect(img, 200, 40, 216, 120, BLACK);   // upper plug arm
+  fillRect(img, 200, 160, 216, 240, BLACK);  // lower plug arm
+  fillRect(img, 60, 132, 208, 148, BLACK);   // nail shaft (flat left end)
+  fillRect(img, 280, 30, 288, 250, BLACK);   // wall line
+  stamp(img, 250, 60, 4, BLACK);             // debris dots
+  stamp(img, 252, 140, 4, BLACK);
+  stamp(img, 248, 220, 4, BLACK);
+  // mimic the plugin: low-res source upscaled to the 1400px working size
+  const up = bilinearResize(img, 1400, 1225);
+  const traced = T.trace(up, {});
+  const { svg, pathCount, pointCount } = T.buildSvg(traced.chains, up.width, up.height, {
+    minLength: 3, matchWeights: true, avgWidth: traced.avgStrokeWidth,
+    strokeWidth: traced.avgStrokeWidth, ink: traced.ink
+  });
+  check('structure preserved (4-9 lines)', pathCount >= 4 && pathCount <= 9, `got ${pathCount}`);
+  check('anchors stay low (<= 40)', pointCount <= 40, `got ${pointCount}`);
+  check('flat caps detected', /stroke-linecap="butt"/.test(svg),
+    (svg.match(/stroke-linecap="[^"]*"/g) || []).join(' '));
+  check('straight bars stay straight (has L segments)', / L /.test(svg));
+  const dotCount = (svg.match(/l 0\.01 0/g) || []).length;
+  check('dots survive the upscale', dotCount >= 2, `got ${dotCount}`);
 }
 
 // --- write a sample SVG for eyeballing -------------------------------------

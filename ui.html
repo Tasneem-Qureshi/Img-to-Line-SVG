@@ -741,7 +741,7 @@ const LineTracer = (() => {
 
   // Full chain -> few cubic segments. Splits at real corners (sharp turns)
   // so an "L" stays sharp while arcs become single flowing curves.
-  function fitChain(points, closed, tol) {
+  function fitChain(points, closed, tol, cornersOut) {
     const pts = [];
     for (const p of points)
       if (!pts.length || (p[0] - pts[pts.length - 1][0]) ** 2 + (p[1] - pts[pts.length - 1][1]) ** 2 > 1e-12)
@@ -920,6 +920,16 @@ const LineTracer = (() => {
       }
       if (isMax) corners.push(i);
     }
+    if (cornersOut) {
+      // record corner geometry (position + in/out directions) so the
+      // caller can probe the source ink for miter vs round joins
+      for (const ci of corners) {
+        const a = closed ? pts[(ci - w + n) % n] : pts[Math.max(0, ci - w)];
+        const b = pts[ci];
+        const c2 = closed ? pts[(ci + w) % n] : pts[Math.min(n - 1, ci + w)];
+        cornersOut.push({ p: b, u: V.norm(V.sub(b, a)), v: V.norm(V.sub(c2, b)) });
+      }
+    }
 
     if (!closed) {
       if (!corners.length) fitSpan(pts);
@@ -953,12 +963,12 @@ const LineTracer = (() => {
   }
 
   // path data; single points render as dots, smooth chains as fitted curves
-  function chainToPathData(chain, smooth, tol) {
+  function chainToPathData(chain, smooth, tol, cornersOut) {
     const p = chain.points, n = p.length;
     if (n === 0) return '';
     if (n === 1) return `M ${fmt(p[0][0])} ${fmt(p[0][1])} l 0.01 0`;
     if (smooth && n >= 3) {
-      const segs = fitChain(p, !!chain.closed, tol || 1.5);
+      const segs = fitChain(p, !!chain.closed, tol || 1.5, cornersOut);
       if (segs.length) {
         const start = segs[0].line ? segs[0].line[0] : segs[0][0];
         let d = `M ${fmt(start[0])} ${fmt(start[1])}`;
@@ -1044,9 +1054,30 @@ const LineTracer = (() => {
     const kept = [];
     for (const c of chains) {
       const len = c.geomLength != null ? c.geomLength : c.points.length;
-      // tiny closed rings (circumference ~ line width) are skeleton knots at
-      // thick junctions, not drawn loops
-      if (o.minLength > 0 && c.closed && c.width != null && len < 3.5 * c.width) continue;
+      // tiny closed rings (circumference ~ line width) are either skeleton
+      // knots at thick junctions (surrounded by ink: drop) or the remnant of
+      // a filled dot after upscaling (isolated: keep as a dot)
+      if (o.minLength > 0 && c.closed && c.width != null && len < 3.5 * c.width) {
+        if (o.ink) {
+          let cx = 0, cy = 0;
+          for (const p of c.points) { cx += p[0]; cy += p[1]; }
+          cx /= c.points.length; cy /= c.points.length;
+          const R = len / (2 * Math.PI) + c.width / 2 + 3;
+          let hits = 0;
+          for (let a = 0; a < 16; a++) {
+            const x = Math.round(cx + R * Math.cos(a * Math.PI / 8) - 0.5);
+            const y = Math.round(cy + R * Math.sin(a * Math.PI / 8) - 0.5);
+            if (x >= 0 && y >= 0 && x < w && y < h && o.ink[y * w + x]) hits++;
+          }
+          if (hits < 3 && c.width >= Math.max(1, o.minLength)) {
+            kept.push({
+              closed: false, points: [[cx, cy]],
+              width: c.width, geomLength: Math.max(len, 1)
+            });
+          }
+        }
+        continue;
+      }
       const bothFree = !c.endDeg || (c.endDeg[0] <= 2 && c.endDeg[1] <= 2);
       // roundish isolated blobs (stitch dots): direction is meaningless —
       // render a dot, not a randomly angled tick
@@ -1061,6 +1092,31 @@ const LineTracer = (() => {
           width: c.width, geomLength: Math.max(len, 1)
         });
         continue;
+      }
+      // disc remnants: a chain no longer than its own widest cross-section,
+      // with no other ink around it, is a filled dot (upscaled dots thin
+      // into short chains, sometimes with internal junctions)
+      if (!c.closed && c.width != null && o.ink &&
+          len < (c.maxWidth || c.width) * 1.15 + 2) {
+        let cx = 0, cy = 0;
+        for (const p of c.points) { cx += p[0]; cy += p[1]; }
+        cx /= c.points.length; cy /= c.points.length;
+        const R = len / 2 + (c.maxWidth || c.width) / 2 + 3;
+        let hits = 0;
+        for (let a = 0; a < 16; a++) {
+          const x = Math.round(cx + R * Math.cos(a * Math.PI / 8) - 0.5);
+          const y = Math.round(cy + R * Math.sin(a * Math.PI / 8) - 0.5);
+          if (x >= 0 && y >= 0 && x < w && y < h && o.ink[y * w + x]) hits++;
+        }
+        if (hits < 3) {
+          if ((c.maxWidth || c.width) >= Math.max(1, o.minLength)) {
+            kept.push({
+              closed: false, points: [[cx, cy]],
+              width: c.maxWidth || c.width, geomLength: Math.max(len, 1)
+            });
+          }
+          continue;
+        }
       }
       if (c.points.length < Math.max(1, o.minLength)) continue;
       if (o.minLength > 0 && !c.closed && c.endDeg && c.width != null) {
@@ -1105,25 +1161,95 @@ const LineTracer = (() => {
       }
       s.width = c.width;
       s.geomLength = len;
+      s.caps = c.caps;
       kept.push(s);
     }
+    // a split disc can produce several coincident dots — keep one
+    for (let i = kept.length - 1; i >= 0; i--) {
+      const a = kept[i];
+      if (a.points.length !== 1) continue;
+      for (let j = 0; j < i; j++) {
+        const b = kept[j];
+        if (b.points.length !== 1) continue;
+        if (Math.hypot(a.points[0][0] - b.points[0][0], a.points[0][1] - b.points[0][1]) <
+            Math.max(a.width || 2, b.width || 2)) {
+          b.width = Math.max(a.width || 2, b.width || 2);
+          kept.splice(i, 1);
+          break;
+        }
+      }
+    }
     const toViewBox = w / o.outW;
+    // one path per weight class, finished with the cap/join style measured
+    // from the source ink (votes across the class's line ends and corners)
+    const mkPath = (chainList, outWidth, traceWidth) => {
+      const dots = [], lines = [];
+      for (const c of chainList) (c.points.length === 1 ? dots : lines).push(c);
+      const corners = [];
+      const d = lines.map(c => chainToPathData(c, o.smooth, c.fitTol, corners)).join(' ');
+      let rc = 0, bc = 0;
+      for (const c of chainList) if (c.caps)
+        for (const cap of c.caps) {
+          if (cap === 'round') rc++;
+          else if (cap === 'butt') bc++;
+        }
+      let mj = 0, rj = 0;
+      if (o.ink) {
+        const wHalf = (traceWidth || 2) / 2;
+        const runFrom = (p, dir) => { // ink run length along a direction
+          const maxR = wHalf * 3 + 4;
+          let r = 0;
+          while (r < maxR) { // half-pixel steps: small strokes need the resolution
+            const x = Math.round(p[0] + dir[0] * (r + 0.5) - 0.5);
+            const y = Math.round(p[1] + dir[1] * (r + 0.5) - 0.5);
+            if (x < 0 || y < 0 || x >= w || y >= h || !o.ink[y * w + x]) break;
+            r += 0.5;
+          }
+          return r;
+        };
+        const rot = (d, a) => [d[0] * Math.cos(a) - d[1] * Math.sin(a),
+                               d[0] * Math.sin(a) + d[1] * Math.cos(a)];
+        for (const cr of corners) {
+          // a miter tip juts out along the outer bisector; a round join is
+          // equidistant in all outward directions. Compare run lengths —
+          // the ratio cancels any inward pull of the corner anchor. Closed
+          // rings traverse in arbitrary winding order, so try both signs
+          // and keep the outward one (the longer run).
+          let bis = V.norm(V.sub(cr.u, cr.v));
+          const rPlus = runFrom(cr.p, bis);
+          const rMinus = runFrom(cr.p, V.scale(bis, -1));
+          if (rMinus > rPlus) bis = V.scale(bis, -1);
+          const rBis = Math.max(rPlus, rMinus);
+          const rSide = (runFrom(cr.p, rot(bis, 0.6)) + runFrom(cr.p, rot(bis, -0.6))) / 2;
+          if (rBis > rSide * 1.2 + 0.5) mj++;
+          else rj++;
+        }
+      }
+      return {
+        d,
+        dotD: dots.map(c => chainToPathData(c, o.smooth, c.fitTol)).join(' '),
+        width: outWidth,
+        cap: bc > rc ? 'butt' : 'round',
+        join: mj > rj ? 'miter' : 'round'
+      };
+    };
     let paths;
     if (o.matchWeights && o.avgWidth > 0 && kept.length && kept.every(c => c.width != null)) {
-      paths = bucketChains(kept).sort((a, b) => b.width - a.width).map(b => ({
-        d: b.chains.map(c => chainToPathData(c, o.smooth, c.fitTol)).join(' '),
-        width: b.width / o.avgWidth * o.strokeWidth
-      }));
+      paths = bucketChains(kept).sort((a, b) => b.width - a.width)
+        .map(b => mkPath(b.chains, b.width / o.avgWidth * o.strokeWidth, b.width));
     } else {
-      paths = [{
-        d: kept.map(c => chainToPathData(c, o.smooth, c.fitTol)).join(' '),
-        width: o.strokeWidth
-      }];
+      paths = [mkPath(kept, o.strokeWidth, o.avgWidth || 2)];
     }
-    const body = paths.map(p =>
-      `<path d="${p.d}" fill="none" stroke="${o.stroke}" ` +
-      `stroke-width="${fmt(Math.max(0.05, p.width * toViewBox))}" ` +
-      `stroke-linecap="round" stroke-linejoin="round"/>`).join('');
+    const body = paths.map(p => {
+      const sw = fmt(Math.max(0.05, p.width * toViewBox));
+      let out = '';
+      if (p.d) out += `<path d="${p.d}" fill="none" stroke="${o.stroke}" stroke-width="${sw}" ` +
+        `stroke-linecap="${p.cap}" stroke-linejoin="${p.join}"/>`;
+      // dots need round caps to render, whatever the class voted
+      if (p.dotD) out += `<path d="${p.dotD}" fill="none" stroke="${o.stroke}" stroke-width="${sw}" ` +
+        `stroke-linecap="round" stroke-linejoin="round"/>`;
+      return out;
+    }).join('');
     const svg =
       `<svg xmlns="http://www.w3.org/2000/svg" width="${fmt(o.outW)}" height="${fmt(o.outH)}" ` +
       `viewBox="0 0 ${w} ${h}">${body}</svg>`;
@@ -1131,7 +1257,8 @@ const LineTracer = (() => {
       svg,
       pathCount: kept.length,
       // anchor points in the final geometry (M/C/L commands), not raw samples
-      pointCount: paths.reduce((s, p) => s + (p.d.match(/[MCL]/g) || []).length, 0),
+      pointCount: paths.reduce((s, p) =>
+        s + (p.d.match(/[MCL]/g) || []).length + (p.dotD.match(/M/g) || []).length, 0),
       weights: paths.map(p => Math.round(p.width * 100) / 100)
     };
   }
@@ -1226,6 +1353,9 @@ const LineTracer = (() => {
       samples.sort((a, b) => a - b);
       const radius = samples[samples.length >> 1] / 3;
       c.width = Math.max(1, 2 * radius - 1);
+      // max width: a filled dot's chain is as "wide" as it is long at its
+      // center, unlike a line — used to recognize disc remnants
+      c.maxWidth = Math.max(1, 2 * samples[samples.length - 1] / 3 - 1);
       c.endWidths = [Math.max(1, 2 * first / 3 - 1), Math.max(1, 2 * last / 3 - 1)];
       c.geomLength = glen;
     }
@@ -1294,6 +1424,47 @@ const LineTracer = (() => {
 
     chains = mergeChains(chains);
 
+    // Cap finishing at free line ends. The skeleton always stops ~width/2
+    // short of the ink face. Probe past the endpoint: a circular profile is
+    // a round cap (keep endpoint; the rendered round cap restores the
+    // length); a flat full-width face is a butt/square end (move the anchor
+    // to the face and finish flat).
+    for (const c of chains) {
+      if (c.closed || c.points.length < 3 || !c.endDeg) continue;
+      c.caps = [null, null];
+      for (const e of [0, 1]) {
+        if (c.endDeg[e] > 1) continue; // attached ends have no cap
+        const n = c.points.length;
+        const pEnd = e === 0 ? c.points[0] : c.points[n - 1];
+        const k = Math.min(6, n - 1);
+        const pIn = e === 0 ? c.points[k] : c.points[n - 1 - k];
+        let tx = pEnd[0] - pIn[0], ty = pEnd[1] - pIn[1];
+        const tl = Math.hypot(tx, ty) || 1;
+        tx /= tl; ty /= tl;
+        const wHalf = (c.width || 2) / 2;
+        const inkAt = (x, y) => {
+          const xi = Math.round(x - 0.5), yi = Math.round(y - 0.5);
+          return xi >= 0 && yi >= 0 && xi < img.width && yi < img.height &&
+                 bin[yi * img.width + xi] === 1;
+        };
+        let L = 0;
+        const maxL = Math.ceil(wHalf * 2 + 4);
+        while (L < maxL && inkAt(pEnd[0] + tx * (L + 1), pEnd[1] + ty * (L + 1))) L++;
+        if (L < Math.max(2, wHalf * 0.4)) { c.caps[e] = 'butt'; continue; }
+        const d = L * 0.75, off = wHalf * 0.8;
+        const flat = inkAt(pEnd[0] + tx * d - ty * off, pEnd[1] + ty * d + tx * off) &&
+                     inkAt(pEnd[0] + tx * d + ty * off, pEnd[1] + ty * d - tx * off);
+        if (flat) {
+          const q = [pEnd[0] + tx * Math.max(0, L - 1), pEnd[1] + ty * Math.max(0, L - 1)];
+          if (e === 0) c.points.unshift(q);
+          else c.points.push(q);
+          c.caps[e] = 'butt';
+        } else {
+          c.caps[e] = 'round';
+        }
+      }
+    }
+
     const total = img.width * img.height;
     let inkCount = 0, skelCount = 0, r = 0, g = 0, b = 0;
     for (let i = 0; i < total; i++) {
@@ -1308,7 +1479,7 @@ const LineTracer = (() => {
     const toHex = v => Math.round(v / (skelCount || 1)).toString(16).padStart(2, '0');
     const inkColor = skelCount ? '#' + toHex(r) + toHex(g) + toHex(b) : '#000000';
 
-    return { chains, width: img.width, height: img.height, mode, threshold, preprocess, avgStrokeWidth, inkColor };
+    return { chains, width: img.width, height: img.height, mode, threshold, preprocess, avgStrokeWidth, inkColor, ink: bin };
   }
 
   return {
@@ -1405,11 +1576,13 @@ if (typeof module !== 'undefined' && module.exports) module.exports = LineTracer
   // ---------- tracing (fully automatic) ----------
   function getImageData() {
     const img = state.image;
-    // trace at up to 2x the native size: bicubic upsampling turns sub-pixel
-    // gaps between near-touching lines (stitch dashes hugging a seam) into
-    // resolvable gray gradients the threshold can separate
+    // trace well above native size: bicubic upsampling turns sub-pixel gaps
+    // and anti-aliased edges into resolvable gradients. Small/low-res images
+    // need MORE than 2x — a 300px icon traces blocky at 600px but cleanly at
+    // ~1400px — so aim for a minimum working resolution, capped at 6x.
     const nat = Math.max(img.naturalWidth, img.naturalHeight);
-    const scale = Math.min(2600, nat * 2) / nat;
+    const target = Math.min(2600, Math.max(nat * 2, 1400));
+    const scale = Math.min(6, target / nat);
     const w = Math.max(2, Math.round(img.naturalWidth * scale));
     const h = Math.max(2, Math.round(img.naturalHeight * scale));
     const canvas = document.createElement('canvas');
@@ -1449,6 +1622,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = LineTracer
       strokeWidth: Math.max(0.1, t.avgStrokeWidth * (outW / t.width) * thickness),
       matchWeights: true,
       avgWidth: t.avgStrokeWidth,
+      ink: t.ink,
       outW, outH
     });
     state.svg = svg;
