@@ -858,6 +858,40 @@ console.log('27. low-res technical icon (320px) traces sharp, not blobby');
   check('dots survive the upscale', dotCount >= 2, `got ${dotCount}`);
 }
 
+// --- 28. skeleton breaks at sharp corners are rejoined with a sharp apex ----
+console.log('28. flared shape: broken corners rejoined, apex kept sharp');
+{
+  // flared trapezoid head drawn crisp, degraded to 340px, retraced at ~4x —
+  // thinning retracts from the sharp flare corners and breaks the ring
+  const art = makeImage(680, 600, WHITE);
+  drawSegment(art, 120, 140, 120, 460, 12, BLACK);
+  drawSegment(art, 120, 140, 230, 200, 12, BLACK);
+  drawSegment(art, 120, 460, 230, 400, 12, BLACK);
+  drawSegment(art, 230, 200, 230, 400, 12, BLACK);
+  const low = bilinearResize(art, 340, 300);
+  const up = bilinearResize(low, 1400, 1235);
+  const traced = T.trace(up, {});
+  const ring = traced.chains.filter(c => c.closed && (c.geomLength || 0) > 1200);
+  check('head ring closed through its corners', ring.length === 1, `got ${ring.length}`);
+  const { svg } = T.buildSvg(traced.chains, up.width, up.height, {
+    minLength: 3, matchWeights: true, avgWidth: traced.avgStrokeWidth,
+    strokeWidth: traced.avgStrokeWidth, ink: traced.ink
+  });
+  const sub = svg.match(/d="([^"]*)"/)[1].split('M ').filter(Boolean)
+    .sort((a, b) => b.length - a.length)[0];
+  const { anchors } = parsePath('M ' + sub);
+  let straightSide = false;
+  for (let i = 1; i < anchors.length; i++) {
+    if (Math.abs(anchors[i][0] - anchors[i - 1][0]) < 5 &&
+        Math.abs(anchors[i][1] - anchors[i - 1][1]) > 550) straightSide = true;
+  }
+  check('left side is one straight vertical segment', straightSide,
+    `anchors: ${anchors.map(a => a.map(Math.round).join(',')).join(' | ')}`);
+  const apexTop = anchors.some(a => Math.hypot(a[0] - 250, a[1] - 293) < 20);
+  const apexBot = anchors.some(a => Math.hypot(a[0] - 250, a[1] - 941) < 20);
+  check('sharp anchors at both rebuilt apexes', apexTop && apexBot);
+}
+
 // --- write a sample SVG for eyeballing -------------------------------------
 {
   const img = makeImage(300, 200, WHITE);
