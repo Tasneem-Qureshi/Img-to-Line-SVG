@@ -892,6 +892,85 @@ console.log('28. flared shape: broken corners rejoined, apex kept sharp');
   check('sharp anchors at both rebuilt apexes', apexTop && apexBot);
 }
 
+// --- 29. keyline primitives: rectangles snap sharp or uniformly rounded -----
+console.log('29. rectangles snap to the keyline primitive');
+{
+  const img = makeImage(320, 260, WHITE);
+  fillRect(img, 60, 60, 260, 200, BLACK);
+  fillRect(img, 69, 69, 251, 191, WHITE); // sharp 9px frame
+  const t1 = T.trace(img, {});
+  const r1 = T.buildSvg(t1.chains, 320, 260, {
+    minLength: 3, matchWeights: true, avgWidth: t1.avgStrokeWidth,
+    strokeWidth: t1.avgStrokeWidth, ink: t1.ink
+  });
+  const d1 = r1.svg.match(/d="([^"]*)"/)[1];
+  check('sharp frame = 4 straight sides, no curves',
+    (d1.match(/L/g) || []).length === 4 && !/C/.test(d1), d1.slice(0, 120));
+  const a1 = parsePath(d1).anchors;
+  const axisAligned = a1.every((p, i) => {
+    if (!i) return true;
+    return Math.abs(p[0] - a1[i - 1][0]) < 0.01 || Math.abs(p[1] - a1[i - 1][1]) < 0.01;
+  });
+  check('sides exactly axis-aligned', axisAligned,
+    a1.map(p => p.map(v => v.toFixed(1)).join(',')).join(' | '));
+
+  // rounded rectangle (radius 30) must keep its uniform rounding
+  const img2 = makeImage(340, 280, WHITE);
+  const rr = 30;
+  for (const [x0, y0, x1, y1] of [[70 + rr, 60, 270 - rr, 60], [70 + rr, 220, 270 - rr, 220]])
+    drawSegment(img2, x0, y0, x1, y1, 9, BLACK);
+  for (const [x0, y0, x1, y1] of [[70, 60 + rr, 70, 220 - rr], [270, 60 + rr, 270, 220 - rr]])
+    drawSegment(img2, x0, y0, x1, y1, 9, BLACK);
+  for (const [cx, cy, a0] of [[70 + rr, 60 + rr, Math.PI], [270 - rr, 60 + rr, 1.5 * Math.PI],
+                              [270 - rr, 220 - rr, 0], [70 + rr, 220 - rr, 0.5 * Math.PI]])
+    for (let a = a0; a <= a0 + Math.PI / 2; a += 0.01)
+      stamp(img2, cx + rr * Math.cos(a), cy + rr * Math.sin(a), 4.5, BLACK);
+  const t2 = T.trace(img2, {});
+  const r2 = T.buildSvg(t2.chains, 340, 280, {
+    minLength: 3, matchWeights: true, avgWidth: t2.avgStrokeWidth,
+    strokeWidth: t2.avgStrokeWidth, ink: t2.ink
+  });
+  const d2 = r2.svg.match(/d="([^"]*)"/)[1];
+  check('rounded rect = 4 sides + 4 arc corners',
+    (d2.match(/L/g) || []).length === 4 && (d2.match(/C/g) || []).length === 4,
+    `L=${(d2.match(/L/g) || []).length} C=${(d2.match(/C/g) || []).length}`);
+}
+
+// --- 30. icon angles: 45° diagonals snap; acute tips stay sharp -------------
+console.log('30. diagonals snap to 45°, chevron tips come to a point');
+{
+  const img = makeImage(300, 200, WHITE);
+  drawSegment(img, 40, 60, 100, 1.5 + 60 + 57, 7, BLACK);  // ~43.6°
+  drawSegment(img, 130, 60, 190, 60 + 61.5, 7, BLACK);     // ~45.7°
+  const traced = T.trace(img, {});
+  const { svg } = T.buildSvg(traced.chains, 300, 200, {
+    minLength: 3, matchWeights: true, avgWidth: traced.avgStrokeWidth,
+    strokeWidth: traced.avgStrokeWidth, ink: traced.ink
+  });
+  let snapped = 0;
+  for (const sub of svg.match(/d="([^"]*)"/)[1].split('M ').filter(Boolean)) {
+    const nums = sub.match(/-?[\d.]+/g).map(Number);
+    if (nums.length === 4 && Math.abs(Math.abs(nums[2] - nums[0]) - Math.abs(nums[3] - nums[1])) < 0.02)
+      snapped++;
+  }
+  check('both near-45° ticks snap to exactly 45°', snapped === 2, `got ${snapped}`);
+
+  // free-standing chevron: acute tip must be a sharp apex, not an arch
+  const img2 = makeImage(260, 240, WHITE);
+  drawSegment(img2, 70, 60, 160, 120, 12, BLACK);
+  drawSegment(img2, 70, 180, 160, 120, 12, BLACK);
+  const t2 = T.trace(img2, {});
+  const chains2 = keptChains(t2, 6);
+  check('chevron = one chain', chains2.length === 1, `got ${chains2.length}`);
+  const r2 = T.buildSvg(t2.chains, 260, 240, {
+    minLength: 3, matchWeights: true, avgWidth: t2.avgStrokeWidth,
+    strokeWidth: t2.avgStrokeWidth, ink: t2.ink
+  });
+  const anchors2 = parsePath(r2.svg.match(/d="([^"]*)"/)[1]).anchors;
+  check('tip apex anchor at the point', anchors2.some(p => Math.hypot(p[0] - 160.5, p[1] - 120.5) < 9),
+    anchors2.map(p => p.map(Math.round).join(',')).join(' | '));
+}
+
 // --- write a sample SVG for eyeballing -------------------------------------
 {
   const img = makeImage(300, 200, WHITE);

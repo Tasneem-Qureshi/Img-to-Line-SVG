@@ -565,7 +565,11 @@ const LineTracer = (() => {
           const tr = c.trim && c.trim[e];
           const p = !free && tr ? tr.p
             : (e === 0 ? c.points[0] : c.points[c.points.length - 1]);
-          ends.push({ ci, e, p, free, dir: dirAt(c, e), width: c.width || 1 });
+          ends.push({
+            ci, e, p, free, dir: dirAt(c, e),
+            width: c.width || 1,
+            len: c.geomLength || c.points.length
+          });
         }
       });
       const cPairs = [];
@@ -577,8 +581,24 @@ const LineTracer = (() => {
           // misroute (e.g. a globe rim onto its meridian)
           if (!A.free && !B.free) continue;
           const gap = Math.hypot(A.p[0] - B.p[0], A.p[1] - B.p[1]);
-          // thinning retracts from sharp corners by ~width/2 on each side
-          if (gap > Math.max(6, (A.width + B.width) * 0.75)) continue;
+          // thinning retracts from sharp corners by ~width/2 per side
+          const baseLim = Math.max(6, (A.width + B.width) * 0.75);
+          if (gap > baseLim) {
+            // acute tips (chevrons, arrowheads) retract much further — allow
+            // a wider reunion, but only on strong evidence: two substantial
+            // free-ended strokes whose tangents clearly converge nearby
+            if (!A.free || !B.free) continue;
+            if (gap > (A.width + B.width) * 1.4) continue;
+            if (A.len < 3 * A.width || B.len < 3 * B.width) continue;
+            const det = -A.dir[0] * B.dir[1] + A.dir[1] * B.dir[0];
+            if (Math.abs(det) < 0.3) continue;
+            const dx = B.p[0] - A.p[0], dy = B.p[1] - A.p[1];
+            const t = (dx * B.dir[1] - dy * B.dir[0]) / det;
+            const ax = A.p[0] - t * A.dir[0], ay = A.p[1] - t * A.dir[1];
+            const reach = (A.width + B.width) * 1.6;
+            if (Math.hypot(ax - A.p[0], ay - A.p[1]) > reach ||
+                Math.hypot(ax - B.p[0], ay - B.p[1]) > reach) continue;
+          }
           // near-collinear ends are separate marks (dashes), not a corner
           if (A.dir[0] * B.dir[0] + A.dir[1] * B.dir[1] < -0.8) continue;
           const ratio = Math.max(A.width, B.width) / Math.max(0.01, Math.min(A.width, B.width));
@@ -877,12 +897,23 @@ const LineTracer = (() => {
           if (d > maxD) maxD = d;
         }
         if (maxD <= Math.max(1.5, tol * 0.9)) {
-          const a = p0.slice(), b = p1.slice();
+          let a = p0.slice(), b = p1.slice();
           // snap almost-horizontal/vertical ruler lines exactly straight
           if (Math.abs(b[1] - a[1]) <= Math.max(2, chord * 0.012)) {
             a[1] = b[1] = (a[1] + b[1]) / 2;
           } else if (Math.abs(b[0] - a[0]) <= Math.max(2, chord * 0.012)) {
             a[0] = b[0] = (a[0] + b[0]) / 2;
+          } else if (chord > 14) {
+            // icon rule: diagonals sit at 45° — snap within ~3.5°
+            const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+            const target = Math.round(ang / (Math.PI / 4)) * (Math.PI / 4);
+            const diagonal = Math.abs(Math.abs(target) - Math.PI / 4) < 1e-6 ||
+                             Math.abs(Math.abs(target) - 3 * Math.PI / 4) < 1e-6;
+            if (diagonal && Math.abs(ang - target) < 0.062) {
+              const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2, half = chord / 2;
+              a = [mx - Math.cos(target) * half, my - Math.sin(target) * half];
+              b = [mx + Math.cos(target) * half, my + Math.sin(target) * half];
+            }
           }
           segs.push({ line: [a, b] });
           return;
@@ -953,6 +984,63 @@ const LineTracer = (() => {
       }
       fitArc(arr.slice(start), tIn, t2);
     };
+
+    // a closed loop that measures as an axis-aligned (rounded) rectangle
+    // becomes a perfect one — the keyline primitive of icon design
+    function rectSnap(ptsArr) {
+      const m = ptsArr.length;
+      if (m < 24) return null;
+      let minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+      for (const p of ptsArr) {
+        if (p[0] < minX) minX = p[0];
+        if (p[0] > maxX) maxX = p[0];
+        if (p[1] < minY) minY = p[1];
+        if (p[1] > maxY) maxY = p[1];
+      }
+      const W = maxX - minX, H = maxY - minY;
+      if (W < 8 || H < 8) return null;
+      const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+      let L = 0;
+      for (let i = 0; i < m; i++) {
+        const a = ptsArr[i], b = ptsArr[(i + 1) % m];
+        L += Math.hypot(b[0] - a[0], b[1] - a[1]);
+      }
+      // corner radius from the perimeter deficit vs the sharp rectangle
+      let r = Math.max(0, (2 * (W + H) - L) / (8 - 2 * Math.PI));
+      if (r >= 0.45 * Math.min(W, H)) return null; // circle/pill: not a rect
+      r = Math.min(r, Math.min(W, H) / 2 - 1);
+      const hw = W / 2 - r, hh = H / 2 - r;
+      const devs = [];
+      for (const p of ptsArr) {
+        const dx = Math.max(Math.abs(p[0] - cx) - hw, 0);
+        const dy = Math.max(Math.abs(p[1] - cy) - hh, 0);
+        devs.push(Math.abs(Math.hypot(dx, dy) - r));
+      }
+      devs.sort((a, b) => a - b);
+      if (devs[Math.floor(m * 0.8)] > Math.max(1.5, tol)) return null;
+      // the skeleton cuts sharp frame corners diagonally (~half the stroke
+      // width), so small radii are artifacts of thinning, not the design:
+      // only clearly larger radii are genuine rounded corners
+      if (r < Math.max(2, tol * 1.6, Math.min(W, H) * 0.06)) {
+        return [ // sharp rectangle: 4 corners, 4 handle-free sides
+          { line: [[minX, minY], [maxX, minY]] },
+          { line: [[maxX, minY], [maxX, maxY]] },
+          { line: [[maxX, maxY], [minX, maxY]] },
+          { line: [[minX, maxY], [minX, minY]] }
+        ];
+      }
+      const k = 0.5522847498 * r;
+      return [ // rounded rectangle: uniform radius, quarter-arc corners
+        { line: [[minX + r, minY], [maxX - r, minY]] },
+        [[maxX - r, minY], [maxX - r + k, minY], [maxX, minY + r - k], [maxX, minY + r]],
+        { line: [[maxX, minY + r], [maxX, maxY - r]] },
+        [[maxX, maxY - r], [maxX, maxY - r + k], [maxX - r + k, maxY], [maxX - r, maxY]],
+        { line: [[maxX - r, maxY], [minX + r, maxY]] },
+        [[minX + r, maxY], [minX + r - k, maxY], [minX, maxY - r + k], [minX, maxY - r]],
+        { line: [[minX, maxY - r], [minX, minY + r]] },
+        [[minX, minY + r], [minX, minY + r - k], [minX + r - k, minY], [minX + r, minY]]
+      ];
+    }
 
     // a closed loop that measures as an axis-aligned circle/ellipse becomes
     // a mathematically perfect one: 4 anchors at the cardinal points
@@ -1052,6 +1140,10 @@ const LineTracer = (() => {
       }
     }
 
+    if (closed) {
+      const rs = rectSnap(pts);
+      if (rs) return rs;
+    }
     if (!closed) {
       if (!corners.length) fitSpan(pts);
       else {
