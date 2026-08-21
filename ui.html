@@ -1288,6 +1288,17 @@ const LineTracer = (() => {
     const kept = [];
     for (const c of chains) {
       const len = c.geomLength != null ? c.geomLength : c.points.length;
+      if (c.filled) {
+        // filled-shape outline: no pruning — smoothing and fit tolerance
+        // scale with the stroke weight, like everything else
+        kept.push({
+          closed: true, filled: true,
+          points: smoothChain(c.points, true, (c.width || 2) * 0.4),
+          fitTol: Math.max(1.5, Math.min(15, (c.width || 2) * 0.45)),
+          width: c.width, geomLength: len
+        });
+        continue;
+      }
       // tiny closed rings (circumference ~ line width) are either skeleton
       // knots at thick junctions (surrounded by ink: drop) or the remnant of
       // a filled dot after upscaling (isolated: keep as a dot)
@@ -1481,14 +1492,24 @@ const LineTracer = (() => {
         join: mj > rj ? 'miter' : 'round'
       };
     };
+    const fills = kept.filter(c => c.filled);
+    const strokesOnly = kept.filter(c => !c.filled);
     let paths;
-    if (o.matchWeights && o.avgWidth > 0 && kept.length && kept.every(c => c.width != null)) {
-      paths = bucketChains(kept).sort((a, b) => b.width - a.width)
+    if (o.matchWeights && o.avgWidth > 0 && strokesOnly.length && strokesOnly.every(c => c.width != null)) {
+      paths = bucketChains(strokesOnly).sort((a, b) => b.width - a.width)
         .map(b => mkPath(b.chains, b.width / o.avgWidth * o.strokeWidth, b.width));
     } else {
-      paths = [mkPath(kept, o.strokeWidth, o.avgWidth || 2)];
+      paths = strokesOnly.length ? [mkPath(strokesOnly, o.strokeWidth, o.avgWidth || 2)] : [];
+    }
+    // solid shapes render as filled outlines, not strokes
+    if (fills.length) {
+      paths.push({
+        d: fills.map(c => chainToPathData(c, o.smooth, c.fitTol)).join(' '),
+        dotD: '', width: 0, cap: 'round', join: 'round', filled: true
+      });
     }
     const body = paths.map(p => {
+      if (p.filled) return `<path d="${p.d}" fill="${o.stroke}" stroke="none"/>`;
       const sw = fmt(Math.max(0.05, p.width * toViewBox));
       let out = '';
       if (p.d) out += `<path d="${p.d}" fill="none" stroke="${o.stroke}" stroke-width="${sw}" ` +
@@ -1507,7 +1528,7 @@ const LineTracer = (() => {
       // anchor points in the final geometry (M/C/L commands), not raw samples
       pointCount: paths.reduce((s, p) =>
         s + (p.d.match(/[MCL]/g) || []).length + (p.dotD.match(/M/g) || []).length, 0),
-      weights: paths.map(p => Math.round(p.width * 100) / 100)
+      weights: paths.filter(p => !p.filled).map(p => Math.round(p.width * 100) / 100)
     };
   }
 
@@ -1606,6 +1627,126 @@ const LineTracer = (() => {
       c.maxWidth = Math.max(1, 2 * samples[samples.length - 1] / 3 - 1);
       c.endWidths = [Math.max(1, 2 * first / 3 - 1), Math.max(1, 2 * last / 3 - 1)];
       c.geomLength = glen;
+    }
+
+    // ---- filled shapes (arrowheads, solid dots, badges) ----
+    // Icons mix strokes with SOLID shapes. A region much fatter than the
+    // stroke weight is a fill, not a line — its skeleton "spine" is
+    // meaningless. Carve such regions out and trace their OUTLINE instead,
+    // to be emitted as filled polygons with sharp corners.
+    {
+      const W = img.width, Hh = img.height;
+      // length-weighted median width: real strokes dominate total length,
+      // so the fat (short) spines of filled shapes can't inflate it
+      const sw = chains.filter(c => c.points.length > 2)
+        .map(c => ({ w: c.width, l: c.geomLength || c.points.length }))
+        .sort((a, b) => a.w - b.w);
+      let totL = 0;
+      for (const e of sw) totL += e.l;
+      let accL = 0, strokeW = 2;
+      for (const e of sw) {
+        accL += e.l;
+        if (accL >= totL / 2) { strokeW = e.w; break; }
+      }
+      const coreR = Math.max(2.5, strokeW * 0.95);
+      const seenC = new Uint8Array(W * Hh);
+      const regionAll = new Uint8Array(W * Hh);
+      const stack = [];
+      const filled = [];
+      for (let i0 = 0; i0 < W * Hh; i0++) {
+        if (seenC[i0] || dist[i0] / 3 < coreR) continue;
+        const comp = [];
+        seenC[i0] = 1;
+        stack.push(i0);
+        let minX = 1e9, maxX = -1, minY = 1e9, maxY = -1, maxD = 0;
+        while (stack.length) {
+          const i = stack.pop();
+          comp.push(i);
+          const x = i % W, y = (i / W) | 0;
+          if (dist[i] > maxD) maxD = dist[i];
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          const nbs = [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < Hh - 1 ? i + W : -1];
+          for (const nb of nbs)
+            if (nb >= 0 && !seenC[nb] && dist[nb] / 3 >= coreR) { seenC[nb] = 1; stack.push(nb); }
+        }
+        const thick = (2 * maxD) / 3;
+        if (comp.length < coreR * coreR * 1.5) continue; // speck
+        // elongated fat = just a thick line (renders identically as stroke)
+        if (Math.max(maxX - minX, maxY - minY) > 3.2 * thick) continue;
+        // grow the core back out to the ink boundary (the fattest point of
+        // the blob dictates how far the boundary can be from the core)
+        const K = Math.ceil(maxD / 3) + 2;
+        let frontier = comp;
+        for (const i of comp) regionAll[i] = 1;
+        const region = new Set(comp);
+        for (let step = 0; step < K && frontier.length; step++) {
+          const nxt = [];
+          for (const i of frontier) {
+            const x = i % W, y = (i / W) | 0;
+            const nbs = [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < Hh - 1 ? i + W : -1];
+            for (const nb of nbs)
+              if (nb >= 0 && bin[nb] && !regionAll[nb]) { regionAll[nb] = 1; region.add(nb); nxt.push(nb); }
+          }
+          frontier = nxt;
+        }
+        // junction guard: a genuine fill has at most ONE stroke attached;
+        // several strokes passing through means this is a fused crossing
+        let passers = 0;
+        for (const c of chains) {
+          let inside = 0;
+          for (const p of c.points)
+            if (regionAll[(p[1] - 0.5) * W + (p[0] - 0.5)]) inside++;
+          if (inside > 0 && inside / c.points.length < 0.7) passers++;
+        }
+        if (passers >= 2) {
+          for (const i of region) regionAll[i] = 0;
+          continue;
+        }
+        // Moore-neighbor boundary trace of the region
+        let start = -1;
+        for (const i of region) if (start < 0 || i < start) start = i;
+        const dxs = [1, 1, 0, -1, -1, -1, 0, 1], dys = [0, 1, 1, 1, 0, -1, -1, -1];
+        const inR = (x, y) => x >= 0 && y >= 0 && x < W && y < Hh && regionAll[y * W + x];
+        const pts = [];
+        let cx = start % W, cy = (start / W) | 0, back = 4;
+        let guard = 8 * region.size + 64;
+        const sx = cx, sy = cy;
+        while (guard-- > 0) {
+          pts.push([cx + 0.5, cy + 0.5]);
+          let d = -1;
+          for (let k = 0; k < 8; k++) {
+            const cand = (back + 1 + k) % 8;
+            if (inR(cx + dxs[cand], cy + dys[cand])) { d = cand; break; }
+          }
+          if (d < 0) break; // isolated pixel
+          cx += dxs[d];
+          cy += dys[d];
+          back = (d + 4) % 8;
+          if (cx === sx && cy === sy) break;
+        }
+        if (pts.length >= 12) {
+          let per = 0;
+          for (let i = 1; i < pts.length; i++)
+            per += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+          filled.push({
+            closed: true, filled: true, points: pts,
+            width: strokeW, geomLength: per, endDeg: [2, 2]
+          });
+        }
+      }
+      if (filled.length) {
+        // drop skeleton spines living inside carved regions
+        chains = chains.filter(c => {
+          let inside = 0;
+          for (const p of c.points)
+            if (regionAll[(p[1] - 0.5) * W + (p[0] - 0.5)]) inside++;
+          return inside / c.points.length < 0.7;
+        });
+        chains.push(...filled);
+      }
     }
 
     // Trim chain ends back out of junction blobs: where strokes cross, the
@@ -1752,7 +1893,16 @@ const LineTracer = (() => {
         r += img.data[p]; g += img.data[p + 1]; b += img.data[p + 2];
       }
     }
-    const avgStrokeWidth = skelCount ? Math.max(1, inkCount / skelCount) : 2;
+    // average stroke weight from the line chains themselves — carved-out
+    // filled shapes must not inflate it
+    let wSum = 0, lSum = 0;
+    for (const c of chains)
+      if (!c.filled && c.points.length > 1) {
+        wSum += (c.width || 1) * (c.geomLength || 1);
+        lSum += c.geomLength || 1;
+      }
+    const avgStrokeWidth = lSum ? Math.max(1, wSum / lSum)
+      : (skelCount ? Math.max(1, inkCount / skelCount) : 2);
     const toHex = v => Math.round(v / (skelCount || 1)).toString(16).padStart(2, '0');
     const inkColor = skelCount ? '#' + toHex(r) + toHex(g) + toHex(b) : '#000000';
 
@@ -1859,7 +2009,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = LineTracer
     // ~1400px — so aim for a minimum working resolution, capped at 6x.
     const nat = Math.max(img.naturalWidth, img.naturalHeight);
     const target = Math.min(2600, Math.max(nat * 2, 1400));
-    const scale = Math.min(6, target / nat);
+    // no upscale cap: a 96px icon needs ~15x to reach working resolution —
+    // bicubic blur at high factors is handled by the geometry snapping
+    const scale = target / nat;
     const w = Math.max(2, Math.round(img.naturalWidth * scale));
     const h = Math.max(2, Math.round(img.naturalHeight * scale));
     const canvas = document.createElement('canvas');

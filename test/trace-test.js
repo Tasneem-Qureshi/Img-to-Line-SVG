@@ -992,6 +992,49 @@ console.log('31. notched ring keeps its notch (no over-snap to rectangle)');
     a.map(p => p.map(Math.round).join(',')).join(' | '));
 }
 
+// --- 32. small icon with a FILLED arrowhead (mdi-style) ----------------------
+console.log('32. 96px icon: filled arrowhead becomes a sharp filled triangle');
+{
+  function fillTri(img, a, b, c, rgba) {
+    const s = (p, q, r) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+    for (let y = 0; y < img.height; y++)
+      for (let x = 0; x < img.width; x++) {
+        const p = [x + 0.5, y + 0.5];
+        const d1 = s(a, b, p), d2 = s(b, c, p), d3 = s(c, a, p);
+        if ((d1 >= 0 && d2 >= 0 && d3 >= 0) || (d1 <= 0 && d2 <= 0 && d3 <= 0)) {
+          const o = (y * img.width + x) * 4;
+          img.data[o] = rgba[0]; img.data[o + 1] = rgba[1];
+          img.data[o + 2] = rgba[2]; img.data[o + 3] = rgba[3];
+        }
+      }
+  }
+  const icon = makeImage(96, 96, WHITE);
+  fillRect(icon, 10, 10, 60, 13, BLACK); fillRect(icon, 10, 10, 13, 60, BLACK);
+  fillRect(icon, 10, 57, 38, 60, BLACK); fillRect(icon, 57, 10, 60, 34, BLACK);
+  fillRect(icon, 36, 84, 86, 87, BLACK); fillRect(icon, 83, 40, 86, 87, BLACK);
+  for (let t = 0; t <= 1; t += 0.005) { // shaft
+    const cx = 44 + t * 30, cy = 44 + t * 30;
+    fillRect(icon, Math.round(cx - 1.7), Math.round(cy - 1.7), Math.round(cx + 1.7), Math.round(cy + 1.7), BLACK);
+  }
+  fillTri(icon, [27, 27], [47, 31], [31, 47], BLACK);
+  const up = bilinearResize(icon, 1400, 1400);
+  const traced = T.trace(up, {});
+  const { svg, pathCount } = T.buildSvg(traced.chains, 1400, 1400, {
+    minLength: 3, matchWeights: true, avgWidth: traced.avgStrokeWidth,
+    strokeWidth: traced.avgStrokeWidth, ink: traced.ink, stroke: '#111'
+  });
+  const fd = (svg.match(/<path d="([^"]*)" fill="#111" stroke="none"/) || [])[1] || '';
+  check('filled head emitted as a fill', fd.length > 0);
+  const fa = parsePath(fd).anchors;
+  check('head is a sharp polygon (<= 5 anchors, straight sides)',
+    fa.length <= 5 && !/C/.test(fd), `anchors ${fa.length}: ${fd.slice(0, 120)}`);
+  check('head tip near the drawn apex', fa.some(p => Math.hypot(p[0] - 394, p[1] - 394) < 25),
+    fa.map(p => p.map(Math.round).join(',')).join(' | '));
+  // the notched square must stay straight and axis-aligned
+  const subs = svg.match(/d="([^"]*)" fill="none"/);
+  check('structure intact (4-7 lines)', pathCount >= 4 && pathCount <= 7, `got ${pathCount}`);
+}
+
 // --- write a sample SVG for eyeballing -------------------------------------
 {
   const img = makeImage(300, 200, WHITE);
