@@ -61,9 +61,13 @@ What the automatic pipeline does:
   loops that measure as circles/ellipses snap to mathematically perfect
   ones — a circle is exactly 4 anchors at its cardinal points,
 - straight strokes are detected and emitted as true 2-anchor line
-  segments (no curve handles, no swivel), and near-horizontal/vertical
-  ruler lines snap exactly straight — a rectangle is 4 corners and 4
-  handle-free sides,
+  segments (no curve handles, no swivel); near-horizontal/vertical lines
+  snap exactly straight and near-45° diagonals snap to exactly 45° —
+  the angle grammar of icon design,
+- closed shapes that measure as axis-aligned rectangles snap to perfect
+  keyline rectangles — sharp-cornered, or uniformly rounded when the
+  source is genuinely rounded — and acute tips (chevrons, arrowheads)
+  are rebuilt to a sharp apex,
 - stroke finishing is measured from the ink: flat line ends become butt
   caps with the anchor moved to the true ink face (round ends stay round),
   and sharp corners emit miter joins while soft ones stay round —

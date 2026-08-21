@@ -971,6 +971,27 @@ console.log('30. diagonals snap to 45°, chevron tips come to a point');
     anchors2.map(p => p.map(Math.round).join(',')).join(' | '));
 }
 
+// --- 31. rectangle snap must never swallow structure (notches, bites) -------
+console.log('31. notched ring keeps its notch (no over-snap to rectangle)');
+{
+  const pts = [];
+  const push = (x1, y1, x2, y2) => {
+    const n = Math.ceil(Math.hypot(x2 - x1, y2 - y1));
+    for (let i = 0; i < n; i++) pts.push([x1 + (x2 - x1) * i / n, y1 + (y2 - y1) * i / n]);
+  };
+  push(100, 100, 200, 100); push(200, 100, 200, 500); push(200, 500, 100, 500);
+  push(100, 500, 100, 345); push(100, 345, 140, 345); push(140, 345, 140, 255);
+  push(140, 255, 100, 255); push(100, 255, 100, 100);
+  const d = T.chainToPathData({ closed: true, points: pts }, true, 3);
+  check('not flattened to a plain rectangle',
+    /C/.test(d) || (d.match(/L/g) || []).length > 5, d.slice(0, 100));
+  const a = parsePath(d).anchors;
+  check('notch corners preserved',
+    a.some(p => Math.hypot(p[0] - 140, p[1] - 345) < 8) &&
+    a.some(p => Math.hypot(p[0] - 140, p[1] - 255) < 8),
+    a.map(p => p.map(Math.round).join(',')).join(' | '));
+}
+
 // --- write a sample SVG for eyeballing -------------------------------------
 {
   const img = makeImage(300, 200, WHITE);

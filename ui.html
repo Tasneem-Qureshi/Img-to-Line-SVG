@@ -1012,12 +1012,33 @@ const LineTracer = (() => {
       const hw = W / 2 - r, hh = H / 2 - r;
       const devs = [];
       for (const p of ptsArr) {
-        const dx = Math.max(Math.abs(p[0] - cx) - hw, 0);
-        const dy = Math.max(Math.abs(p[1] - cy) - hh, 0);
-        devs.push(Math.abs(Math.hypot(dx, dy) - r));
+        // SIGNED distance to the rounded-rect outline: interior deviations
+        // (notches, bites) count fully, not just outside ones
+        const qx = Math.abs(p[0] - cx) - hw, qy = Math.abs(p[1] - cy) - hh;
+        const outside = Math.hypot(Math.max(qx, 0), Math.max(qy, 0));
+        const inside = Math.min(Math.max(qx, qy), 0);
+        devs.push(Math.abs(outside + inside - r));
       }
-      devs.sort((a, b) => a - b);
-      if (devs[Math.floor(m * 0.8)] > Math.max(1.5, tol)) return null;
+      // a LONG contiguous off-rectangle stretch is structure (a notch, a
+      // bite, a protrusion) — never snap it away. Short dents (junction
+      // artifacts) are fine. Measured as arc length around the ring.
+      const gate = Math.max(1.5, tol);
+      const runCap = Math.max(3 * tol, 0.05 * L);
+      let run = 0, started = false;
+      for (let i = 0; i < 2 * m; i++) {
+        const idx = i % m;
+        if (devs[idx] > gate) {
+          const prev = ptsArr[(idx - 1 + m) % m];
+          run += Math.hypot(ptsArr[idx][0] - prev[0], ptsArr[idx][1] - prev[1]);
+          if (run > runCap) return null;
+          started = true;
+        } else {
+          if (i >= m && started) break; // full wrap covered
+          run = 0;
+        }
+      }
+      const sorted = devs.slice().sort((a, b) => a - b);
+      if (sorted[Math.floor(m * 0.8)] > gate) return null;
       // the skeleton cuts sharp frame corners diagonally (~half the stroke
       // width), so small radii are artifacts of thinning, not the design:
       // only clearly larger radii are genuine rounded corners
