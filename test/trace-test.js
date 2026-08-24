@@ -1035,6 +1035,40 @@ console.log('32. 96px icon: filled arrowhead becomes a sharp filled triangle');
   check('structure intact (4-7 lines)', pathCount >= 4 && pathCount <= 7, `got ${pathCount}`);
 }
 
+// --- 33. very thick strokes (small icon upscaled): scale invariance ----------
+console.log('33. 100px camera icon: straight sides, clean joints at 14x');
+{
+  const icon = makeImage(100, 76, WHITE);
+  const t = 6, R = 8;
+  drawSegment(icon, 12 + R, 12, 64 - R, 12, t, BLACK);
+  drawSegment(icon, 12 + R, 64, 64 - R, 64, t, BLACK);
+  drawSegment(icon, 12, 12 + R, 12, 64 - R, t, BLACK);
+  drawSegment(icon, 64, 12 + R, 64, 64 - R, t, BLACK);
+  for (const [cx, cy, a0] of [[12 + R, 12 + R, Math.PI], [64 - R, 12 + R, 1.5 * Math.PI],
+                              [64 - R, 64 - R, 0], [12 + R, 64 - R, 0.5 * Math.PI]])
+    for (let a = a0; a <= a0 + Math.PI / 2; a += 0.02)
+      stamp(icon, cx + R * Math.cos(a), cy + R * Math.sin(a), t / 2, BLACK);
+  drawSegment(icon, 66, 38, 88, 18, t, BLACK);
+  drawSegment(icon, 66, 38, 88, 58, t, BLACK);
+  drawSegment(icon, 88, 18, 88, 58, t, BLACK);
+  const up = bilinearResize(icon, 1400, 1064);
+  const traced = T.trace(up, {});
+  const { svg, pathCount, pointCount } = T.buildSvg(traced.chains, 1400, 1064, {
+    minLength: 3, matchWeights: true, avgWidth: traced.avgStrokeWidth,
+    strokeWidth: traced.avgStrokeWidth, ink: traced.ink
+  });
+  check('few clean elements (<= 4 lines)', pathCount <= 4, `got ${pathCount}`);
+  check('anchors stay low (<= 22)', pointCount <= 22, `got ${pointCount}`);
+  // no hooks/overshoots: every anchor within the drawn icon bounds + margin
+  let inBounds = true;
+  for (const m of svg.matchAll(/d="([^"]*)"/g)) {
+    const nums = m[1].match(/-?[\d.]+/g).map(Number);
+    for (let i = 0; i + 1 < nums.length; i += 2)
+      if (nums[i] < 60 || nums[i] > 1340 || nums[i + 1] < 60 || nums[i + 1] > 1010) inBounds = false;
+  }
+  check('no overshoot hooks past the artwork', inBounds);
+}
+
 // --- write a sample SVG for eyeballing -------------------------------------
 {
   const img = makeImage(300, 200, WHITE);

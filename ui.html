@@ -1113,7 +1113,7 @@ const LineTracer = (() => {
     // corner detection: direction change measured across a window. The
     // window scales with the fit tolerance (~stroke width) so it spans the
     // rounded zone left by polyline smoothing and staircase steps alike.
-    const w = Math.max(2, Math.min(30, Math.round(Math.max(6, tol * 4)), n >> 3));
+    const w = Math.max(2, Math.min(120, Math.round(Math.max(6, tol * 4)), n >> 3));
     const turn = i => {
       const a = closed ? pts[(i - w + n) % n] : pts[Math.max(0, i - w)];
       const b = pts[i];
@@ -1226,7 +1226,7 @@ const LineTracer = (() => {
   // Endpoints stay pinned so junction connections are preserved.
   function smoothChain(points, closed, radius) {
     const n = points.length;
-    const r = Math.max(1, Math.min(12, Math.round(radius)));
+    const r = Math.max(1, Math.min(40, Math.round(radius))); // scale-invariant: no low cap
     if (n < 2 * r + 3) return points;
     let pts = points;
     for (let pass = 0; pass < 2; pass++) {
@@ -1294,7 +1294,7 @@ const LineTracer = (() => {
         kept.push({
           closed: true, filled: true,
           points: smoothChain(c.points, true, (c.width || 2) * 0.4),
-          fitTol: Math.max(1.5, Math.min(15, (c.width || 2) * 0.45)),
+          fitTol: Math.max(1.5, Math.min(45, (c.width || 2) * 0.45)),
           width: c.width, geomLength: len
         });
         continue;
@@ -1391,7 +1391,7 @@ const LineTracer = (() => {
       // width-adaptive tolerance: wiggles that are detail on a 2px line are
       // centerline noise on a 14px stroke
       const eps = o.simplify > 0
-        ? Math.max(o.simplify, Math.min(12, (c.width || 1) * 0.35))
+        ? Math.max(o.simplify, Math.min(40, (c.width || 1) * 0.35))
         : o.simplify;
       let s;
       if (o.smooth) {
@@ -1847,11 +1847,32 @@ const LineTracer = (() => {
     // a round cap (keep endpoint; the rendered round cap restores the
     // length); a flat full-width face is a butt/square end (move the anchor
     // to the face and finish flat).
+    const freeEnds = [];
+    for (const c of chains) {
+      if (c.closed || c.points.length < 2 || !c.endDeg) continue;
+      for (const e of [0, 1])
+        if (c.endDeg[e] <= 1)
+          freeEnds.push({
+            c, e,
+            p: e === 0 ? c.points[0] : c.points[c.points.length - 1],
+            w: c.width || 1
+          });
+    }
     for (const c of chains) {
       if (c.closed || c.points.length < 3 || !c.endDeg) continue;
       c.caps = [null, null];
       for (const e of [0, 1]) {
         if (c.endDeg[e] > 1) continue; // attached ends have no cap
+        {
+          // an end near another chain's end is an (unjoined) corner — the
+          // "ink face" out there belongs to the neighbour stroke, so any
+          // flat-cap extension would overshoot the joint as a hook
+          const pe = e === 0 ? c.points[0] : c.points[c.points.length - 1];
+          const nearOther = freeEnds.some(o =>
+            o.c !== c &&
+            Math.hypot(o.p[0] - pe[0], o.p[1] - pe[1]) < ((c.width || 1) + o.w) * 1.4);
+          if (nearOther) { c.caps[e] = 'round'; continue; }
+        }
         const n = c.points.length;
         const pEnd = e === 0 ? c.points[0] : c.points[n - 1];
         const k = Math.min(6, n - 1);
