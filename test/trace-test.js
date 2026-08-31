@@ -1069,6 +1069,304 @@ console.log('33. 100px camera icon: straight sides, clean joints at 14x');
   check('no overshoot hooks past the artwork', inBounds);
 }
 
+// ============ SCENARIO MATRIX (real-world robustness acceptance) ============
+function gaussBlur(img, sigma) {
+  const r = Math.max(1, Math.round(sigma * 1.2));
+  let cur = img;
+  for (let pass = 0; pass < 3; pass++) {
+    const { width: w, height: h, data } = cur;
+    const tmp = new Float32Array(data.length);
+    const out = new Uint8ClampedArray(data.length);
+    const span = 2 * r + 1;
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      for (let ch = 0; ch < 4; ch++) {
+        let acc = 0;
+        for (let x = -r; x <= r; x++) acc += data[(row + Math.min(w - 1, Math.max(0, x))) * 4 + ch];
+        for (let x = 0; x < w; x++) {
+          tmp[(row + x) * 4 + ch] = acc / span;
+          acc += data[(row + Math.min(w - 1, x + r + 1)) * 4 + ch] - data[(row + Math.max(0, x - r)) * 4 + ch];
+        }
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      for (let ch = 0; ch < 4; ch++) {
+        let acc = 0;
+        for (let y = -r; y <= r; y++) acc += tmp[(Math.min(h - 1, Math.max(0, y)) * w + x) * 4 + ch];
+        for (let y = 0; y < h; y++) {
+          out[(y * w + x) * 4 + ch] = acc / span;
+          acc += tmp[(Math.min(h - 1, y + r + 1) * w + x) * 4 + ch] - tmp[(Math.max(0, y - r) * w + x) * 4 + ch];
+        }
+      }
+    }
+    cur = { width: w, height: h, data: out };
+  }
+  return cur;
+}
+function flattenPathD(d) {
+  const tokens = d.match(/[MLCZzlm]|-?[\d.]+(?:e-?\d+)?/g) || [];
+  const polys = [];
+  let poly = null, cur = [0, 0], startPt = null, i = 0;
+  const num = () => +tokens[i++];
+  while (i < tokens.length) {
+    const t = tokens[i++];
+    if (t === 'M') {
+      if (poly && poly.length > 1) polys.push(poly);
+      cur = [num(), num()]; startPt = cur; poly = [cur];
+    } else if (t === 'L') { cur = [num(), num()]; poly.push(cur); }
+    else if (t === 'l') { cur = [cur[0] + num(), cur[1] + num()]; poly.push(cur); }
+    else if (t === 'C') {
+      const c1 = [num(), num()], c2 = [num(), num()], p = [num(), num()];
+      const p0 = cur;
+      for (let s = 1; s <= 16; s++) {
+        const u = s / 16, q = 1 - u;
+        poly.push([
+          q*q*q*p0[0] + 3*q*q*u*c1[0] + 3*q*u*u*c2[0] + u*u*u*p[0],
+          q*q*q*p0[1] + 3*q*q*u*c1[1] + 3*q*u*u*c2[1] + u*u*u*p[1]
+        ]);
+      }
+      cur = p;
+    } else if (t === 'Z' || t === 'z') { if (startPt) poly.push(startPt); }
+  }
+  if (poly && poly.length > 1) polys.push(poly);
+  return polys;
+}
+function overlayMetric(svg, srcImg, inkThreshold) {
+  const W = srcImg.width, H = srcImg.height;
+  const truthMask = inkThreshold instanceof Uint8Array ? inkThreshold : null;
+  const thr = truthMask ? 128 : (inkThreshold || 128);
+  const ink = truthMask || new Uint8Array(W * H);
+  if (!truthMask)
+    for (let i = 0; i < W * H; i++) {
+      const o = i * 4;
+      const lum = 0.2126 * srcImg.data[o] + 0.7152 * srcImg.data[o + 1] + 0.0722 * srcImg.data[o + 2];
+      const a = srcImg.data[o + 3] / 255;
+      if (lum * a + 255 * (1 - a) < thr) ink[i] = 1;
+    }
+  const dil = new Uint8Array(ink);
+  for (let pass = 0; pass < 3; pass++) {
+    const prev = new Uint8Array(dil);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      if (prev[y * W + x]) continue;
+      if ((x > 0 && prev[y * W + x - 1]) || (x < W - 1 && prev[y * W + x + 1]) ||
+          (y > 0 && prev[(y - 1) * W + x]) || (y < H - 1 && prev[(y + 1) * W + x])) dil[y * W + x] = 1;
+    }
+  }
+  const vb = svg.match(/viewBox="0 0 ([\d.]+) ([\d.]+)"/);
+  const k = vb ? W / +vb[1] : 1;
+  const mask = new Uint8Array(W * H);
+  for (const m of svg.matchAll(/<path d="([^"]*)"([^>]*)>/g)) {
+    const attrs = m[2];
+    const isFill = /fill="#/.test(attrs);
+    const wm = attrs.match(/stroke-width="([\d.]+)"/);
+    const r = isFill ? 1 : (wm ? +wm[1] * k / 2 : 1);
+    for (const poly0 of flattenPathD(m[1])) {
+      const poly = poly0.map(p => [p[0] * k, p[1] * k]);
+      for (let kk = 0; kk + 1 < poly.length; kk++) {
+        const [x1, y1] = poly[kk], [x2, y2] = poly[kk + 1];
+        const steps = Math.max(1, Math.ceil(Math.hypot(x2 - x1, y2 - y1)));
+        for (let s = 0; s <= steps; s++) {
+          const cx2 = x1 + (x2 - x1) * s / steps, cy2 = y1 + (y2 - y1) * s / steps;
+          const rr = Math.max(1, r);
+          for (let y = Math.floor(cy2 - rr); y <= cy2 + rr; y++)
+            for (let x = Math.floor(cx2 - rr); x <= cx2 + rr; x++)
+              if (x >= 0 && y >= 0 && x < W && y < H && (x - cx2) ** 2 + (y - cy2) ** 2 <= rr * rr)
+                mask[y * W + x] = 1;
+        }
+      }
+      if (isFill) {
+        let minY = 1e9, maxY = -1;
+        for (const p of poly) { minY = Math.min(minY, p[1]); maxY = Math.max(maxY, p[1]); }
+        for (let y = Math.max(0, Math.floor(minY)); y <= Math.min(H - 1, maxY); y++) {
+          const xs = [];
+          for (let kk = 0; kk + 1 < poly.length; kk++) {
+            const [x1, y1] = poly[kk], [x2, y2] = poly[kk + 1];
+            if ((y1 <= y && y2 > y) || (y2 <= y && y1 > y)) xs.push(x1 + (y - y1) / (y2 - y1) * (x2 - x1));
+          }
+          xs.sort((a, b) => a - b);
+          for (let kk = 0; kk + 1 < xs.length; kk += 2)
+            for (let x = Math.max(0, Math.ceil(xs[kk])); x <= Math.min(W - 1, xs[kk + 1]); x++)
+              mask[y * W + x] = 1;
+        }
+      }
+    }
+  }
+  let inkN = 0, cov = 0, maskN = 0, phantom = 0;
+  for (let i = 0; i < W * H; i++) {
+    if (ink[i]) { inkN++; if (mask[i]) cov++; }
+    if (mask[i]) { maskN++; if (!dil[i]) phantom++; }
+  }
+  return { coverage: inkN ? cov / inkN : 1, phantom: maskN ? phantom / maskN : 0 };
+}
+function traceScenario(img) {
+  const nat = Math.max(img.width, img.height);
+  const scale = Math.min(2600, Math.max(nat * 2, 1400)) / nat;
+  const up = bilinearResize(img, Math.round(img.width * scale), Math.round(img.height * scale));
+  const traced = T.trace(up, {});
+  const r = T.buildSvg(traced.chains, up.width, up.height, {
+    minLength: 3, matchWeights: true, avgWidth: traced.avgStrokeWidth,
+    strokeWidth: traced.avgStrokeWidth, ink: traced.ink, stroke: '#111',
+    outW: img.width, outH: img.height
+  });
+  return { traced, r };
+}
+function crispScene() {
+  const img = makeImage(700, 520, WHITE);
+  drawSegment(img, 80, 80, 420, 80, 7, BLACK);
+  drawSegment(img, 420, 80, 420, 300, 7, BLACK);
+  drawSegment(img, 420, 300, 80, 300, 7, BLACK);
+  drawSegment(img, 80, 300, 80, 80, 7, BLACK);
+  for (let a = 0; a < 2 * Math.PI; a += 0.004)
+    stamp(img, 560 + 90 * Math.cos(a), 190 + 90 * Math.sin(a), 3.5, BLACK);
+  drawSegment(img, 120, 380, 620, 380, 6, BLACK);
+  drawSegment(img, 120, 440, 380, 470, 6, BLACK);
+  return img;
+}
+function truthOf(img) {
+  const t = new Uint8Array(img.width * img.height);
+  for (let i = 0; i < t.length; i++) {
+    const o = i * 4;
+    if (0.2126 * img.data[o] + 0.7152 * img.data[o + 1] + 0.0722 * img.data[o + 2] < 128) t[i] = 1;
+  }
+  return t;
+}
+
+console.log('34. scenario E: photographed sketch (uneven lighting)');
+{
+  const img = makeImage(700, 520, WHITE);
+  const truth = new Uint8Array(700 * 520);
+  for (let y = 0; y < 520; y++)
+    for (let x = 0; x < 700; x++) {
+      const v = 250 - (x + y) / 1220 * 82;
+      const o = (y * 700 + x) * 4;
+      img.data[o] = img.data[o + 1] = img.data[o + 2] = v;
+    }
+  let seed = 5;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  for (let i = 0; i < 9000; i++) {
+    const x = Math.floor(rnd() * 700), y = Math.floor(rnd() * 520);
+    const o = (y * 700 + x) * 4;
+    const v = Math.max(0, Math.min(255, img.data[o] + (rnd() - 0.5) * 14));
+    img.data[o] = img.data[o + 1] = img.data[o + 2] = v;
+  }
+  const dark = (x, y) => 250 - (x + y) / 1220 * 82 - 58;
+  const stampT = (x, y, r) => {
+    stamp(img, x, y, r, [dark(x, y), dark(x, y), dark(x, y), 255]);
+    for (let yy = Math.floor(y - r); yy <= y + r; yy++)
+      for (let xx = Math.floor(x - r); xx <= x + r; xx++)
+        if (xx >= 0 && yy >= 0 && xx < 700 && yy < 520 && (xx - x) ** 2 + (yy - y) ** 2 <= r * r)
+          truth[yy * 700 + xx] = 1;
+  };
+  for (let t2 = 0; t2 <= 1; t2 += 0.002) stampT(100 + t2 * 480, 120 + Math.sin(t2 * 5) * 40, 3);
+  for (let a = 0; a < 2 * Math.PI; a += 0.004) stampT(350 + 100 * Math.cos(a), 330 + 80 * Math.sin(a), 3);
+  for (let t2 = 0; t2 <= 1; t2 += 0.002) stampT(480 + t2 * 160, 250 + t2 * 180, 3);
+  const { r } = traceScenario(img);
+  const om = overlayMetric(r.svg, img, truth);
+  check('sketch coverage >= 85%', om.coverage >= 0.85, (om.coverage * 100).toFixed(1) + '%');
+  check('sketch phantom <= 10%', om.phantom <= 0.10, (om.phantom * 100).toFixed(1) + '%');
+}
+
+console.log('35. scenario F: soft blur recovers the true drawing');
+{
+  const crisp = crispScene();
+  const { traced, r } = traceScenario(gaussBlur(crisp, 3));
+  const om = overlayMetric(r.svg, crisp, truthOf(crisp));
+  check('soft blur: preprocessing engaged', traced.preprocess !== 'none', traced.preprocess);
+  check('soft blur coverage >= 90%', om.coverage >= 0.90, (om.coverage * 100).toFixed(1) + '%');
+  check('soft blur phantom <= 5%', om.phantom <= 0.05, (om.phantom * 100).toFixed(1) + '%');
+}
+
+console.log('36. scenario F: severe blur is best-effort WITH a warning');
+{
+  const crisp = crispScene();
+  const { traced, r } = traceScenario(gaussBlur(crisp, 7));
+  const om = overlayMetric(r.svg, crisp, truthOf(crisp));
+  check('severe blur warns', traced.warnings.some(w => /blurry/i.test(w)));
+  check('severe blur still covers >= 85%', om.coverage >= 0.85, (om.coverage * 100).toFixed(1) + '%');
+  check('no confetti explosion (<= 60 paths)', r.pathCount <= 60, `got ${r.pathCount}`);
+}
+
+console.log('37. scenario I: crosshatch lines stay separate');
+{
+  const img = makeImage(600, 400, WHITE);
+  for (let i = 0; i < 12; i++) drawSegment(img, 60 + i * 24, 60, 60 + i * 24 + 160, 220, 5, BLACK);
+  for (let i = 0; i < 12; i++) drawSegment(img, 60 + i * 24 + 160, 60, 60 + i * 24, 220, 5, BLACK);
+  for (let i = 0; i < 8; i++) drawSegment(img, 80, 280 + i * 12, 520, 280 + i * 12, 5, BLACK);
+  const { r } = traceScenario(img);
+  const om = overlayMetric(r.svg, img, 128);
+  check('crosshatch coverage >= 85%', om.coverage >= 0.85, (om.coverage * 100).toFixed(1) + '%');
+  check('crosshatch phantom <= 7%', om.phantom <= 0.07, (om.phantom * 100).toFixed(1) + '%');
+  check('lines not mass-merged (>= 22)', r.pathCount >= 22, `got ${r.pathCount}`);
+}
+
+console.log('38. scenario M: colored lines on colored background');
+{
+  const img = makeImage(600, 400, [236, 226, 198, 255]);
+  drawSegment(img, 80, 80, 520, 80, 7, [40, 70, 180, 255]);
+  for (let a = 0; a < 2 * Math.PI; a += 0.004)
+    stamp(img, 300 + 90 * Math.cos(a), 240 + 90 * Math.sin(a), 3.5, [40, 70, 180, 255]);
+  const { traced, r } = traceScenario(img);
+  const om = overlayMetric(r.svg, img, 170);
+  check('color coverage >= 95%', om.coverage >= 0.95, (om.coverage * 100).toFixed(1) + '%');
+  check('color phantom <= 5%', om.phantom <= 0.05, (om.phantom * 100).toFixed(1) + '%');
+  const rr = parseInt(traced.inkColor.slice(1, 3), 16), bb = parseInt(traced.inkColor.slice(5, 7), 16);
+  check('ink color sampled bluish', bb > rr + 40, traced.inkColor);
+}
+
+console.log('39. scenario O: photos are flagged, never silent');
+{
+  const img = makeImage(500, 400, WHITE);
+  for (let y = 0; y < 400; y++)
+    for (let x = 0; x < 500; x++) {
+      const v = 120 + 90 * Math.sin(x / 90) * Math.cos(y / 70) + (x / 500) * 40;
+      const o = (y * 500 + x) * 4;
+      img.data[o] = img.data[o + 1] = img.data[o + 2] = v;
+    }
+  for (let a = 0; a < 2 * Math.PI; a += 0.002)
+    for (let rr = 0; rr < 70; rr++)
+      stamp(img, 250 + rr * Math.cos(a), 200 + rr * Math.sin(a), 1, [60 + rr, 60 + rr, 60 + rr, 255]);
+  const { traced } = traceScenario(img);
+  check('photo gets an explicit warning', traced.warnings.length > 0, JSON.stringify(traced.warnings));
+}
+
+console.log('40. gap bridging: heals breaks, never welds dashes');
+{
+  // a line broken by small gaps (~0.4x width of clear space) must heal
+  // (drawSegment caps add width/2 of ink beyond each endpoint)
+  const img = makeImage(500, 120, WHITE);
+  for (const [a, b] of [[40, 150], [164, 290], [304, 440]])
+    drawSegment(img, a, 60, b, 60, 10, BLACK);
+  const t1 = T.trace(img, {});
+  check('broken line healed to 1 chain', keptChains(t1, 6).length === 1,
+    `got ${keptChains(t1, 6).length}`);
+  // dashes (clear gaps ~3x width) must NOT weld
+  const img2 = makeImage(500, 120, WHITE);
+  for (const [a, b] of [[40, 110], [150, 220], [260, 330], [370, 440]])
+    drawSegment(img2, a, 60, b, 60, 10, BLACK);
+  const t2 = T.trace(img2, {});
+  check('dashes stay separate (4 chains)', keptChains(t2, 6).length === 4,
+    `got ${keptChains(t2, 6).length}`);
+  // bridge = 0 disables healing entirely
+  const t3 = T.trace(img, { bridge: 0 });
+  check('bridge=0 keeps fragments', keptChains(t3, 6).length === 3,
+    `got ${keptChains(t3, 6).length}`);
+}
+
+console.log('41. threshold choice never erodes legitimate dots');
+{
+  // circle with a center dot (e.g. a dial icon): erosion-rewarding threshold
+  // scoring once picked a threshold strict enough to thin the dot to nothing
+  const img = makeImage(700, 520, WHITE);
+  for (let a = 0; a < 2 * Math.PI; a += 0.004)
+    stamp(img, 350 + 90 * Math.cos(a), 260 + 90 * Math.sin(a), 3.5, BLACK);
+  stamp(img, 350, 260, 4, BLACK);
+  drawSegment(img, 80, 80, 620, 80, 7, BLACK);
+  const up = bilinearResize(img, 1400, 1040);
+  const t = T.trace(up, {});
+  const dot = t.chains.filter(c => c.points.every(p => Math.hypot(p[0] - 700, p[1] - 520) < 40));
+  check('center dot survives tracing', dot.length === 1, `got ${dot.length}`);
+}
+
 // --- write a sample SVG for eyeballing -------------------------------------
 {
   const img = makeImage(300, 200, WHITE);

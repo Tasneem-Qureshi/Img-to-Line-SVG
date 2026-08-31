@@ -18,13 +18,30 @@ art is thinned to a 1px skeleton, walked into paths, and emitted as
 ## Use
 
 Drop / paste (⌘V) / open a line-art image — or select a layer and hit
-**Use selected layer** — then **Add to canvas**. There are no settings:
-everything is derived from the image automatically.
+**Use selected layer** — then **Add to canvas**. Everything is derived
+from the image automatically.
 
-- **Thickness** is the only control: 100% = every line exactly as thick as
-  in the image; drag for uniformly thicker or thinner. It resets to 100%
-  per image.
+- **Thickness**: 100% = every line exactly as thick as in the image; drag
+  for uniformly thicker or thinner. It resets to 100% per image.
 - **Copy SVG** puts the raw markup on the clipboard instead.
+- **Adjust** (collapsed by default) is the rescue hatch for difficult
+  sources — only needed when the automatic trace misses:
+  - **Threshold** — offset around the auto-tuned ink threshold,
+  - **Detail** — keep more anchors (right) or simplify harder (left),
+  - **Gap bridge** — how far broken line fragments may heal, as a % of
+    the line's own width (0 = off; dashes are never welded),
+  - **Sharpen** — set automatically when blur is detected (the slider
+    shows what was applied); adjustable or 0 to disable,
+  - **Invert** — flip dark-on-light / light-on-dark detection,
+  - **Show binarized** — see the intermediate black/white image the
+    tracer actually worked from.
+
+Tracing runs in a Web Worker with live progress and a **Cancel** button —
+the UI never freezes, and slider changes supersede a running trace. If an
+image needs preprocessing (denoise / sharpen / lighting correction) or
+looks blurry or photo-like, the plugin says so under the result stats.
+Very busy traces warn above ~300 paths and cap at the 900 longest lines
+so the Figma import stays usable.
 
 What the automatic pipeline does:
 
@@ -35,10 +52,17 @@ What the automatic pipeline does:
   auto-tunes the threshold by skeleton topology: starting from Otsu's
   value, it tries stricter thresholds and keeps the one with the fewest
   fused lines (junctions), broken lines (endpoints), and stray dots,
-- low-quality sources (fuzzy edges, speckle/JPEG noise, low contrast) are
-  detected and denoised automatically: a Gaussian-blurred variant competes
-  in the same topology scoring and is used only when it wins decisively —
-  crisp fine detail is never blurred,
+- low-quality sources are detected and remediated automatically: denoise
+  (speckle/JPEG noise), unsharp masking (soft or blurry images, radius
+  scaled to measured blur), and background flattening + Sauvola adaptive
+  thresholding with hysteresis (photographed sketches with uneven lighting
+  or shadows) all compete in the same topology scoring and win only when
+  the measured structure says they help — crisp fine detail is never
+  blurred; severely blurry or photo-like sources produce an explicit
+  warning instead of silent confetti,
+- broken line fragments (blur, faint pencil) are healed by gap bridging
+  scaled to each line's own width and requiring the two ends to continue
+  in the same direction — dashed stitching is never welded,
 - measures every line's own thickness (distance transform along the
   skeleton) and groups lines into up to 6 weight classes, each emitted as
   its own path — thick outlines stay thick, fine stitching stays fine,
@@ -96,8 +120,12 @@ test harness extracts and runs that exact block in Node:
 node test/trace-test.js
 ```
 
-48 checks over synthetic images (lines, circles, junctions, crossings,
+131 checks over synthetic images (lines, circles, junctions, crossings,
 dashed stitching, dots, wobbly strokes, transparent/inverted variants,
-pokes, knots, collapsed loops, weight fidelity) plus a regression test on
-a real AI-generated fashion flat (`test/fixtures/bodysuit.bmp.gz`) —
-asserting threshold tuning, dash survival, and weight ratios.
+pokes, knots, collapsed loops, weight fidelity, icon-rule snapping, filled
+shapes, scale invariance) plus a regression test on a real AI-generated
+fashion flat (`test/fixtures/bodysuit.bmp.gz`) and a real-world scenario
+matrix with overlay acceptance metrics (ink coverage / phantom strokes):
+photographed sketch under uneven lighting, soft and severe blur, crosshatch
+separation, colored lines on colored background, photo detection, and
+gap-bridging semantics (heals breaks, never welds dashes).

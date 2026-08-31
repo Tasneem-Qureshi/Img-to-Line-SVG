@@ -56,6 +56,29 @@
 
   #status { margin-top: 8px; color: var(--text-2); min-height: 14px; }
   #status .mode { color: var(--text); }
+  #warn { margin-top: 4px; color: #b8860b; display: none; }
+  #warn.visible { display: block; }
+
+  #progressRow { display: none; align-items: center; gap: 8px; margin-top: 8px; }
+  #progressRow.visible { display: flex; }
+  #progressBar { flex: 1; height: 4px; border-radius: 2px; background: var(--surface); overflow: hidden; }
+  #progressBar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+  #progressRow button { flex: none; padding: 3px 10px; }
+
+  #adjust { display: none; margin-top: 10px; border-top: 1px solid var(--border); padding-top: 6px; }
+  #adjust.visible { display: block; }
+  #adjust summary { cursor: pointer; color: var(--text-2); list-style: none; }
+  #adjust summary::before { content: '▸ '; }
+  #adjust[open] summary::before { content: '▾ '; }
+  .ctl {
+    display: grid; grid-template-columns: 62px 1fr 44px;
+    align-items: center; gap: 8px; margin-top: 8px;
+  }
+  .ctl label { color: var(--text-2); }
+  .ctl output { text-align: right; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .checks { display: flex; gap: 16px; margin-top: 10px; color: var(--text-2); }
+  .checks label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+  .checks input { accent-color: var(--accent); }
 </style>
 
 <div id="dropzone">
@@ -84,9 +107,42 @@
   <input type="range" id="thickness" min="25" max="400" value="100" step="5">
   <output id="thicknessOut">100%</output>
 </div>
+<details id="adjust">
+  <summary>Adjust (automatic — open only if the trace needs rescuing)</summary>
+  <div class="ctl">
+    <label for="thrOff">Threshold</label>
+    <input type="range" id="thrOff" min="-60" max="60" value="0" step="2">
+    <output id="thrOffOut">auto</output>
+  </div>
+  <div class="ctl">
+    <label for="detail">Detail</label>
+    <input type="range" id="detail" min="0" max="100" value="50" step="5">
+    <output id="detailOut">auto</output>
+  </div>
+  <div class="ctl">
+    <label for="bridge">Gap bridge</label>
+    <input type="range" id="bridge" min="0" max="300" value="55" step="5">
+    <output id="bridgeOut">auto</output>
+  </div>
+  <div class="ctl">
+    <label for="sharpen">Sharpen</label>
+    <input type="range" id="sharpen" min="0" max="300" value="0" step="10">
+    <output id="sharpenOut">auto</output>
+  </div>
+  <div class="checks">
+    <label><input type="checkbox" id="invert"> Invert</label>
+    <label><input type="checkbox" id="binView"> Show binarized</label>
+  </div>
+</details>
+<div id="progressRow">
+  <div id="progressBar"><i></i></div>
+  <span id="progressLabel"></span>
+  <button id="cancelBtn">Cancel</button>
+</div>
 <div id="status"></div>
+<div id="warn"></div>
 
-<script>
+<script id="tracerScript">
 /* ===== TRACER-START =====
  * Fully automatic centerline vectorizer:
  *   binarize (Otsu + polarity auto) -> Zhang-Suen thinning -> skeleton walk
@@ -98,6 +154,12 @@
  * iframe and the Node test harness.
  */
 const LineTracer = (() => {
+
+  // optional coarse progress reporting (used by the plugin's Web Worker;
+  // a no-op in the Node test harness)
+  let progressCb = null;
+  function setProgress(cb) { progressCb = cb; }
+  function progress(frac, label) { if (progressCb) progressCb(frac, label); }
 
   function otsu(hist, total) {
     let sum = 0;
@@ -197,6 +259,126 @@ const LineTracer = (() => {
       }
     }
     return { width: w, height: h, data: out };
+  }
+
+  // Grayscale (alpha composited over white), shared by the raster tools
+  function toGray(img) {
+    const { width: w, height: h, data } = img;
+    const g = new Float32Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      const o = i * 4, a = data[o + 3] / 255;
+      g[i] = (0.2126 * data[o] + 0.7152 * data[o + 1] + 0.0722 * data[o + 2]) * a + 255 * (1 - a);
+    }
+    return g;
+  }
+
+  function boxBlurGray(g, w, h, r) {
+    const tmp = new Float32Array(g.length), out = new Float32Array(g.length);
+    const span = 2 * r + 1;
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      let acc = 0;
+      for (let x = -r; x <= r; x++) acc += g[row + Math.min(w - 1, Math.max(0, x))];
+      for (let x = 0; x < w; x++) {
+        tmp[row + x] = acc / span;
+        acc += g[row + Math.min(w - 1, x + r + 1)] - g[row + Math.max(0, x - r)];
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      let acc = 0;
+      for (let y = -r; y <= r; y++) acc += tmp[Math.min(h - 1, Math.max(0, y)) * w + x];
+      for (let y = 0; y < h; y++) {
+        out[y * w + x] = acc / span;
+        acc += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x];
+      }
+    }
+    return out;
+  }
+
+  // Blur measure: Laplacian variance (normalized by dynamic range) — low
+  // values mean soft edges. Classified against fixture-calibrated cutoffs.
+  function measureBlur(img) {
+    const { width: w, height: h } = img;
+    const g = toGray(img);
+    let lo = 255, hi = 0;
+    for (let i = 0; i < g.length; i++) { if (g[i] < lo) lo = g[i]; if (g[i] > hi) hi = g[i]; }
+    const range = Math.max(1, hi - lo);
+    // sharpness = strong-edge Laplacian response (95th percentile), which
+    // is independent of how MUCH edge the drawing has
+    const laps = [];
+    for (let y = 1; y < h - 1; y += 2)
+      for (let x = 1; x < w - 1; x += 2) {
+        const i = y * w + x;
+        const lap = Math.abs(4 * g[i] - g[i - 1] - g[i + 1] - g[i - w] - g[i + w]) / range;
+        if (lap > 0.01) laps.push(lap);
+      }
+    laps.sort((a, b) => a - b);
+    const p95 = laps.length ? laps[Math.floor(laps.length * 0.95)] : 0;
+    return { p95, grade: p95 > 0.5 ? 'sharp' : p95 > 0.22 ? 'soft' : 'severe' };
+  }
+
+  // Unsharp mask: img + amount * (img - blurred)
+  function unsharp(img, radius, amount) {
+    const { width: w, height: h, data } = img;
+    const g = toGray(img);
+    const bl = boxBlurGray(g, w, h, Math.max(1, Math.round(radius)));
+    const out = new Uint8ClampedArray(data.length);
+    for (let i = 0; i < w * h; i++) {
+      const v = Math.max(0, Math.min(255, g[i] + amount * (g[i] - bl[i])));
+      const o = i * 4;
+      out[o] = out[o + 1] = out[o + 2] = v;
+      out[o + 3] = 255;
+    }
+    return { width: w, height: h, data: out };
+  }
+
+  // Background flattening (division normalization): kills uneven lighting
+  // and shadows so faint strokes separate from the paper
+  function flattenBg(img) {
+    const { width: w, height: h } = img;
+    const g = toGray(img);
+    const bg = boxBlurGray(g, w, h, Math.max(8, Math.round(Math.min(w, h) / 7)));
+    const out = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const v = Math.max(0, Math.min(255, (g[i] / Math.max(1, bg[i])) * 235));
+      const o = i * 4;
+      out[o] = out[o + 1] = out[o + 2] = v;
+      out[o + 3] = 255;
+    }
+    return { width: w, height: h, data: out };
+  }
+
+  // Sauvola local adaptive threshold + hysteresis: ink where the pixel is
+  // locally dark; weak ink kept only when connected to strong ink.
+  function sauvolaBin(img, mode, off) {
+    off = off || 0;
+    const { width: w, height: h } = img;
+    const g = toGray(img);
+    const dark = mode === 'light' ? g.map(v => 255 - v) : g;
+    const win = Math.max(15, Math.min(90, Math.round(Math.min(w, h) / 16)));
+    const mean = boxBlurGray(dark, w, h, win);
+    const sq = new Float32Array(dark.length);
+    for (let i = 0; i < dark.length; i++) sq[i] = dark[i] * dark[i];
+    const meanSq = boxBlurGray(sq, w, h, win);
+    const bin = new Uint8Array(w * h);
+    const weak = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      const sd = Math.sqrt(Math.max(0, meanSq[i] - mean[i] * mean[i]));
+      const thr = mean[i] * (1 - 0.28 * (1 - sd / 128)); // dark ink is BELOW local mean
+      if (dark[i] < thr - 6 + off) bin[i] = 1;           // strong
+      else if (dark[i] < thr + 10 + off) weak[i] = 1;    // weak: needs support
+    }
+    // hysteresis: grow strong into weak
+    const stack = [];
+    for (let i = 0; i < w * h; i++) if (bin[i]) stack.push(i);
+    while (stack.length) {
+      const i = stack.pop();
+      const x = i % w, y = (i / w) | 0;
+      const nbs = [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1];
+      for (const nb of nbs)
+        if (nb >= 0 && weak[nb] && !bin[nb]) { bin[nb] = 1; stack.push(nb); }
+    }
+    return bin;
   }
 
   // Fill pinholes inside strokes: JPEG mottling / upscaling noise leaves
@@ -438,7 +620,7 @@ const LineTracer = (() => {
   // neighbors chop drawn lines into fragments — pair up ends that meet at
   // the same junction going in opposite directions with similar widths, so
   // lines flow through intersections like in the original drawing.
-  function mergeChains(chains) {
+  function mergeChains(chains, bridgeMult) {
     const dirAt = (c, end) => {
       const pts = c.points, n = pts.length;
       const a = end === 0 ? pts[0] : pts[n - 1];
@@ -677,6 +859,69 @@ const LineTracer = (() => {
       }
       if (!addedC.length) break;
       list = list.filter((_, ci) => !dropC.has(ci)).concat(addedC);
+    }
+    // gap bridging: blurry/broken lines skeletonize as fragments — rejoin
+    // free ends that are close AND continue in the same direction (unlike
+    // corner joins, which require NON-collinear ends). bridgeMult scales the
+    // allowed INK gap per pair (endpoint distance minus the ~w/2 the skeleton
+    // retracts into each cap), relative to the pair's own width — so a
+    // hairline's dashes are never judged by a thick outline's width.
+    // bridgeMult = 0 turns this off entirely, protecting dashed lines.
+    if (bridgeMult > 0) {
+      for (let round = 0; round < 3; round++) {
+        const ends = [];
+        list.forEach((c, ci) => {
+          if (c.closed || c.points.length < 2) return;
+          for (const e of [0, 1]) {
+            if (c.endDeg && c.endDeg[e] > 1) continue;
+            const p = e === 0 ? c.points[0] : c.points[c.points.length - 1];
+            ends.push({ ci, e, p, dir: dirAt(c, e), width: c.width || 1 });
+          }
+        });
+        const bPairs = [];
+        for (let i = 0; i < ends.length; i++) {
+          for (let j = i + 1; j < ends.length; j++) {
+            const A = ends[i], B = ends[j];
+            if (A.ci === B.ci) continue;
+            const capRetract = (A.width + B.width) / 2;
+            const inkGap = Math.hypot(A.p[0] - B.p[0], A.p[1] - B.p[1]) - capRetract;
+            if (inkGap > bridgeMult * capRetract) continue;
+            const gap = Math.max(0, inkGap);
+            if (A.dir[0] * B.dir[0] + A.dir[1] * B.dir[1] > -0.85) continue; // must be a continuation
+            const ratio = Math.max(A.width, B.width) / Math.max(0.01, Math.min(A.width, B.width));
+            if (ratio > 1.7) continue;
+            bPairs.push({ A, B, gap });
+          }
+        }
+        if (!bPairs.length) break;
+        bPairs.sort((a, b) => a.gap - b.gap);
+        const usedB = new Set(), usedChainB = new Set(), dropB = new Set(), addedB = [];
+        for (const pr of bPairs) {
+          const kA = pr.A.ci + ':' + pr.A.e, kB = pr.B.ci + ':' + pr.B.e;
+          if (usedB.has(kA) || usedB.has(kB)) continue;
+          if (usedChainB.has(pr.A.ci) || usedChainB.has(pr.B.ci)) continue;
+          const A = list[pr.A.ci], B = list[pr.B.ci];
+          const ptsA = pr.A.e === 1 ? A.points.slice() : A.points.slice().reverse();
+          const ptsB = pr.B.e === 0 ? B.points.slice() : B.points.slice().reverse();
+          const lenA = A.geomLength != null ? A.geomLength : A.points.length;
+          const lenB = B.geomLength != null ? B.geomLength : B.points.length;
+          const ew = ch => ch.endWidths || [ch.width || 1, ch.width || 1];
+          addedB.push({
+            closed: false,
+            forced: (A.forced || []).concat(B.forced || []),
+            points: ptsA.concat(ptsB),
+            width: ((A.width || 1) * lenA + (B.width || 1) * lenB) / ((lenA + lenB) || 1),
+            geomLength: lenA + lenB + pr.gap,
+            endDeg: [pr.A.e === 1 ? A.endDeg[0] : A.endDeg[1], pr.B.e === 0 ? B.endDeg[1] : B.endDeg[0]],
+            endWidths: [pr.A.e === 1 ? ew(A)[0] : ew(A)[1], pr.B.e === 0 ? ew(B)[1] : ew(B)[0]]
+          });
+          usedB.add(kA); usedB.add(kB);
+          usedChainB.add(pr.A.ci); usedChainB.add(pr.B.ci);
+          dropB.add(pr.A.ci); dropB.add(pr.B.ci);
+        }
+        if (!addedB.length) break;
+        list = list.filter((_, ci) => !dropB.has(ci)).concat(addedB);
+      }
     }
     // a long chain whose two junction-attached ends nearly meet is a ring
     // that lost a stretch to a shared fusion zone (a globe rim losing its
@@ -1281,10 +1526,12 @@ const LineTracer = (() => {
   // output px (thickness scaling); per-chain widths stay proportional.
   function buildSvg(chains, w, h, opts) {
     const o = Object.assign({
-      simplify: 1, smooth: true, minLength: 4,
+      simplify: 1, smooth: true, minLength: 4, detail: 1,
       stroke: '#000000', strokeWidth: 2, outW: w, outH: h,
       matchWeights: true, avgWidth: 0
     }, opts || {});
+    // detail: fit-tolerance multiplier (<1 keeps more anchors, >1 simplifies)
+    const dMul = Math.max(0.1, o.detail || 1);
     const kept = [];
     for (const c of chains) {
       const len = c.geomLength != null ? c.geomLength : c.points.length;
@@ -1294,7 +1541,7 @@ const LineTracer = (() => {
         kept.push({
           closed: true, filled: true,
           points: smoothChain(c.points, true, (c.width || 2) * 0.4),
-          fitTol: Math.max(1.5, Math.min(45, (c.width || 2) * 0.45)),
+          fitTol: Math.max(1.5, Math.min(45, (c.width || 2) * 0.45)) * dMul,
           width: c.width, geomLength: len
         });
         continue;
@@ -1391,7 +1638,7 @@ const LineTracer = (() => {
       // width-adaptive tolerance: wiggles that are detail on a 2px line are
       // centerline noise on a 14px stroke
       const eps = o.simplify > 0
-        ? Math.max(o.simplify, Math.min(40, (c.width || 1) * 0.35))
+        ? Math.max(o.simplify, Math.min(40, (c.width || 1) * 0.35)) * dMul
         : o.simplify;
       let s;
       if (o.smooth) {
@@ -1536,9 +1783,12 @@ const LineTracer = (() => {
   // needed to reproduce the source look (average weight, ink color).
   function trace(img, opts) {
     const o = opts || {};
+    progress(0.04, 'analyzing');
     const auto = analyze(img);
-    const mode = !o.mode || o.mode === 'auto' ? auto.mode : o.mode;
-    let threshold, bin, skel, preprocess = 'none';
+    let mode = !o.mode || o.mode === 'auto' ? auto.mode : o.mode;
+    if (o.invert && mode !== 'alpha') mode = mode === 'dark' ? 'light' : 'dark';
+    const warnings = [];
+    let threshold, bin, skel, preprocess = 'none', sharpenApplied = 0;
     if (o.threshold != null) {
       threshold = o.threshold;
       bin = fillHoles(binarize(img, threshold, mode), img.width, img.height);
@@ -1562,8 +1812,12 @@ const LineTracer = (() => {
       // rank candidates on a half-scale proxy (thinning is the hot path and
       // the topology ORDERING is preserved), then thin only the winner at
       // full resolution
+      // NOTE: the whole variant competition is tuned at THIS proxy
+      // resolution — changing the cutoff or filter reshuffles which
+      // candidates win across every scenario (dense hatching trades a
+      // little coverage for it; see test 37's bounds)
       let proxy = img;
-      if (img.width * img.height > 1400 * 1400) {
+      if (img.width * img.height > 700 * 700) {
         const pw = img.width >> 1, ph = img.height >> 1;
         const pd = new Uint8ClampedArray(pw * ph * 4);
         for (let y = 0; y < ph; y++) {
@@ -1577,35 +1831,101 @@ const LineTracer = (() => {
         }
         proxy = { width: pw, height: ph, data: pd };
       }
-      const variants = [
-        { key: 'none', img: proxy },
-        { key: 'blur', img: boxBlurRGBA(proxy, proxy === img ? 2 : 1) }
-      ];
-      const bests = {};
-      for (const v of variants) {
-        // blurring shifts the histogram — each variant gets thresholds from
-        // its OWN Otsu, or a strict ladder shrinks blurred ink around holes
-        const base = v.key === 'none' ? auto.threshold : analyze(v.img).threshold;
-        for (const t of ladder(base)) {
-          const b = fillHoles(binarize(v.img, t, mode), proxy.width, proxy.height);
-          const s = thin(b, proxy.width, proxy.height);
-          const st = topoStats(s, proxy.width, proxy.height);
-          if (!bests[v.key] || st.score > bests[v.key].score) bests[v.key] = { t, v: v.key, score: st.score };
-        }
+      // score = skeleton topology minus an ink-fraction sanity penalty
+      // (topology alone can't see that a candidate "traced" the background)
+      const totalPx = proxy.width * proxy.height;
+      const scoreBin = raw => {
+        const b = fillHoles(raw, proxy.width, proxy.height);
+        const s = thin(b, proxy.width, proxy.height);
+        const st = topoStats(s, proxy.width, proxy.height);
+        let inkN = 0;
+        for (let i = 0; i < b.length; i++) inkN += b[i];
+        return { topo: st.score, inkN };
+      };
+      progress(0.1, 'tuning threshold');
+      const blurInfo = measureBlur(proxy);
+      const shAmt = o.sharpen === 0 ? 0
+        : (typeof o.sharpen === 'number' ? o.sharpen
+        : (blurInfo.grade !== 'sharp' ? 1.6 : 0));
+      const cands = [];
+      const half = arr => arr.filter((_, i) => i % 2 === 0);
+      for (const t of ladder(auto.threshold))
+        cands.push({ key: 'none', t, ...scoreBin(binarize(proxy, t, mode)) });
+      const proxBlur = boxBlurRGBA(proxy, proxy === img ? 2 : 1);
+      for (const t of half(ladder(analyze(proxBlur).threshold)))
+        cands.push({ key: 'blur', t, ...scoreBin(binarize(proxBlur, t, mode)) });
+      const sharpRadius = blurInfo.grade === 'severe'
+        ? Math.round(Math.min(proxy.width, proxy.height) / 70)
+        : Math.round(Math.min(proxy.width, proxy.height) / 130);
+      if (shAmt > 0 && mode !== 'alpha') {
+        // unsharp mask restores edge contrast on soft/blurry sources —
+        // radius scales with how blurred the image measured
+        const pSharp = unsharp(proxy, Math.max(2, sharpRadius), shAmt);
+        for (const t of ladder(analyze(pSharp).threshold))
+          cands.push({ key: 'sharp', t, ...scoreBin(binarize(pSharp, t, mode)) });
       }
-      // topology can't see fidelity (dissolved detail also 'cleans' the
-      // skeleton), so denoising must win clearly, not on a tie. Measured
-      // margins: fine-detail art scores ~1.03x under blur (must reject),
-      // genuinely noisy sources ~1.2x+ (must accept) — gate between them.
-      const best = bests.blur && bests.blur.score > bests.none.score * 1.1 + 50
-        ? bests.blur : bests.none;
-      threshold = best.t;
-      trace.lastTuning = bests; // diagnostics for tests/debugging
-      preprocess = best.v;
-      const srcImg = preprocess === 'blur' ? boxBlurRGBA(img, 2) : img;
-      bin = fillHoles(binarize(srcImg, threshold, mode), img.width, img.height);
+      if (mode !== 'alpha') {
+        // background flattening + Sauvola + hysteresis: the answer to uneven
+        // lighting and shadows that no global threshold can pass
+        cands.push({ key: 'adaptive', t: auto.threshold,
+          ...scoreBin(sauvolaBin(flattenBg(proxy), mode, o.thresholdOffset || 0)) });
+      }
+      // ink economy (same structure captured with less ink = more faithful;
+      // a blur/sharpen halo is fat, the true stroke core lean) applies WITHIN
+      // each preprocessed variant's ladder and between the finalists — but
+      // NOT within the raw ladder: there it would reward ever-stricter
+      // thresholds for eroding legitimate dots and thinning strokes.
+      const econPick = arr => {
+        let mi = Infinity;
+        for (const c of arr) if (c.inkN > totalPx * 0.002) mi = Math.min(mi, c.inkN);
+        if (!isFinite(mi)) mi = 0;
+        let b = null;
+        for (const c of arr) {
+          c.score = c.topo - Math.max(0, c.inkN - mi) * 0.05;
+          if (!b || c.score > b.score) b = c;
+        }
+        return b;
+      };
+      let bestNone = null;
+      for (const c of cands)
+        if (c.key === 'none' && (!bestNone || c.topo > bestNone.topo)) bestNone = c;
+      const bestOther = econPick(cands.filter(c => c.key !== 'none'));
+      const finalists = [bestNone, bestOther].filter(Boolean);
+      let minInk = Infinity;
+      for (const c of finalists) if (c.inkN > totalPx * 0.002) minInk = Math.min(minInk, c.inkN);
+      if (!isFinite(minInk)) minInk = 0;
+      for (const c of finalists) c.score = c.topo - Math.max(0, c.inkN - minInk) * 0.05;
+      // fidelity bias: preprocessing must win decisively on SHARP images
+      // (protecting crisp fine detail) — on measured-blurry images the
+      // remediation is expected to win, so the bar drops
+      const gate = s => blurInfo.grade === 'sharp' ? s * 1.1 + 50 : s * 0.85;
+      const best = bestOther && (!bestNone || bestOther.score > gate(bestNone.score))
+        ? bestOther : bestNone;
+      trace.lastTuning = { cands, best };
+      preprocess = best.key;
+      if (best.key === 'sharp') sharpenApplied = shAmt;
+      if (blurInfo.grade === 'severe')
+        warnings.push('Image is very blurry — result may need cleanup; a sharper source is recommended.');
+      if (best.score <= 0)
+        warnings.push('No clear line structure found — this may be a photo or continuous-tone image; the trace may not be meaningful.');
+      const off = o.thresholdOffset || 0;
+      if (best.key === 'adaptive') {
+        threshold = best.t;
+        bin = fillHoles(sauvolaBin(flattenBg(img), mode, off), img.width, img.height);
+      } else {
+        let srcImg = img;
+        if (best.key === 'blur') srcImg = boxBlurRGBA(img, 2);
+        else if (best.key === 'sharp')
+          srcImg = unsharp(img, Math.max(2, blurInfo.grade === 'severe'
+            ? Math.round(Math.min(img.width, img.height) / 70)
+            : Math.round(Math.min(img.width, img.height) / 130)), shAmt);
+        threshold = Math.max(1, Math.min(254, best.t + (mode === 'light' ? -off : off)));
+        bin = fillHoles(binarize(srcImg, threshold, mode), img.width, img.height);
+      }
+      progress(0.4, 'thinning');
       skel = thin(bin, img.width, img.height);
     }
+    progress(0.62, 'tracing lines');
     let chains = extractChains(skel, img.width, img.height);
 
     const dist = distanceTransform(bin, img.width, img.height);
@@ -1634,6 +1954,7 @@ const LineTracer = (() => {
     // stroke weight is a fill, not a line — its skeleton "spine" is
     // meaningless. Carve such regions out and trace their OUTLINE instead,
     // to be emitted as filled polygons with sharp corners.
+    let strokeWmed = 2;
     {
       const W = img.width, Hh = img.height;
       // length-weighted median width: real strokes dominate total length,
@@ -1648,6 +1969,7 @@ const LineTracer = (() => {
         accL += e.l;
         if (accL >= totL / 2) { strokeW = e.w; break; }
       }
+      strokeWmed = strokeW;
       const coreR = Math.max(2.5, strokeW * 0.95);
       const seenC = new Uint8Array(W * Hh);
       const regionAll = new Uint8Array(W * Hh);
@@ -1840,8 +2162,13 @@ const LineTracer = (() => {
       if (hits >= 3) c.debris = true;
     }
 
-    chains = mergeChains(chains);
+    // gap bridging is a multiplier of the local pair width (0 = off)
+    const bridgeMult = o.bridge === 0 ? 0
+      : (typeof o.bridge === 'number' ? o.bridge : 0.55);
+    progress(0.75, 'merging junctions');
+    chains = mergeChains(chains, bridgeMult);
 
+    progress(0.9, 'finishing');
     // Cap finishing at free line ends. The skeleton always stops ~width/2
     // short of the ink face. Probe past the endpoint: a circular profile is
     // a round cap (keep endpoint; the rendered round cap restores the
@@ -1926,13 +2253,27 @@ const LineTracer = (() => {
       : (skelCount ? Math.max(1, inkCount / skelCount) : 2);
     const toHex = v => Math.round(v / (skelCount || 1)).toString(16).padStart(2, '0');
     const inkColor = skelCount ? '#' + toHex(r) + toHex(g) + toHex(b) : '#000000';
+    // photo tell: real line art has consistent stroke widths along chains;
+    // photo/texture blob spines have chaotic widths
+    {
+      let n = 0, s1 = 0, s2 = 0;
+      for (const c of chains)
+        if (!c.filled && c._pw && c.points.length > 4)
+          for (const wv of c._pw) { n++; s1 += wv; s2 += wv * wv; }
+      if (n > 40) {
+        const m = s1 / n, cv = Math.sqrt(Math.max(0, s2 / n - m * m)) / m;
+        if (cv > 0.62 && !warnings.some(w => w.includes('line structure')))
+          warnings.push('No clear line structure found — this may be a photo or continuous-tone image; the trace may not be meaningful.');
+      }
+    }
 
-    return { chains, width: img.width, height: img.height, mode, threshold, preprocess, avgStrokeWidth, inkColor, ink: bin };
+    return { chains, width: img.width, height: img.height, mode, threshold, preprocess, sharpenApplied, warnings, avgStrokeWidth, inkColor, ink: bin };
   }
 
   return {
     analyze, binarize, thin, extractChains, mergeChains, simplifyChain,
-    chainToPathData, buildSvg, trace, rdp, otsu, distanceTransform, bucketChains
+    chainToPathData, buildSvg, trace, rdp, otsu, distanceTransform, bucketChains,
+    setProgress
   };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = LineTracer;
@@ -1944,7 +2285,10 @@ if (typeof module !== 'undefined' && module.exports) module.exports = LineTracer
   const $ = id => document.getElementById(id);
   const dropzone = $('dropzone'), fileInput = $('fileInput');
   const srcImg = $('srcImg'), traceImg = $('traceImg');
-  const actions = $('actions'), status = $('status');
+  const actions = $('actions'), status = $('status'), warn = $('warn');
+
+  const PATH_WARN = 300;   // above this Figma gets sluggish
+  const PATH_CAP = 900;    // hard cap: keep the longest lines, tell the user
 
   const state = {
     image: null,
@@ -1952,7 +2296,12 @@ if (typeof module !== 'undefined' && module.exports) module.exports = LineTracer
     exportScale: 1,   // selection exports come in upscaled; divide back out
     traced: null,
     svg: null,
-    lastBlobUrl: null
+    lastBlobUrl: null,
+    binUrl: null,
+    worker: null,
+    job: 0,           // stale worker replies are dropped by job id
+    tracing: false,
+    autoSharpen: true // sharpen slider mirrors the auto value until touched
   };
 
   function syncHeight() {
@@ -1970,12 +2319,20 @@ if (typeof module !== 'undefined' && module.exports) module.exports = LineTracer
       state.image = img;
       state.name = name || 'Line trace';
       state.exportScale = exportScale || 1;
-      $('thickness').value = 100;
-      $('thicknessOut').textContent = '100%';
+      // new image: back to fully automatic
+      state.autoSharpen = true;
+      $('thickness').value = 100; $('thicknessOut').textContent = '100%';
+      $('thrOff').value = 0; $('thrOffOut').textContent = 'auto';
+      $('detail').value = 50; $('detailOut').textContent = 'auto';
+      $('bridge').value = 55; $('bridgeOut').textContent = 'auto';
+      $('sharpen').value = 0; $('sharpenOut').textContent = 'auto';
+      $('invert').checked = false;
+      $('binView').checked = false;
       srcImg.src = url;
       dropzone.classList.add('has-image');
       actions.style.display = 'flex';
       $('thicknessRow').classList.add('visible');
+      $('adjust').classList.add('visible');
       syncHeight();
       retrace();
     };
@@ -2021,13 +2378,13 @@ if (typeof module !== 'undefined' && module.exports) module.exports = LineTracer
     }
   };
 
-  // ---------- tracing (fully automatic) ----------
+  // ---------- tracing (worker so the UI never freezes) ----------
   function getImageData() {
     const img = state.image;
     // trace well above native size: bicubic upsampling turns sub-pixel gaps
     // and anti-aliased edges into resolvable gradients. Small/low-res images
     // need MORE than 2x — a 300px icon traces blocky at 600px but cleanly at
-    // ~1400px — so aim for a minimum working resolution, capped at 6x.
+    // ~1400px — so aim for a minimum working resolution.
     const nat = Math.max(img.naturalWidth, img.naturalHeight);
     const target = Math.min(2600, Math.max(nat * 2, 1400));
     // no upscale cap: a 96px icon needs ~15x to reach working resolution —
@@ -2044,18 +2401,119 @@ if (typeof module !== 'undefined' && module.exports) module.exports = LineTracer
     return ctx.getImageData(0, 0, w, h);
   }
 
+  function currentOpts() {
+    const opts = {};
+    const off = +$('thrOff').value;
+    if (off) opts.thresholdOffset = off;
+    if ($('invert').checked) opts.invert = true;
+    if (!state.autoSharpen) opts.sharpen = +$('sharpen').value / 100;
+    const b = +$('bridge').value;
+    if (b !== 55) opts.bridge = b / 100; // 55% = the automatic default
+    return opts;
+  }
+
+  function getWorker() {
+    if (state.worker) return state.worker;
+    const src = document.getElementById('tracerScript');
+    if (!src || typeof Worker === 'undefined') return null;
+    try {
+      const harness =
+        '\nLineTracer.setProgress((f, label) =>' +
+        ' self.postMessage({ type: "progress", job: self.__job, f, label }));' +
+        '\nself.onmessage = e => {' +
+        '\n  const { job, buf, width, height, opts } = e.data;' +
+        '\n  self.__job = job;' +
+        '\n  try {' +
+        '\n    const t = LineTracer.trace({ data: new Uint8ClampedArray(buf), width, height }, opts);' +
+        '\n    self.postMessage({ type: "done", job, traced: t }, [t.ink.buffer]);' +
+        '\n  } catch (err) {' +
+        '\n    self.postMessage({ type: "error", job, message: err && err.message || String(err) });' +
+        '\n  }' +
+        '\n};';
+      const blob = new Blob([src.textContent, harness], { type: 'text/javascript' });
+      const w = new Worker(URL.createObjectURL(blob));
+      w.onmessage = onWorkerMsg;
+      w.onerror = () => { if (state.tracing) traceFailed('worker error'); };
+      state.worker = w;
+      return w;
+    } catch (_) {
+      return null; // fall back to tracing on the main thread
+    }
+  }
+
+  let t0 = 0;
   function retrace() {
     if (!state.image) return;
-    setStatus('Tracing…');
-    setTimeout(() => { // let the status paint before blocking
-      const t0 = performance.now();
-      try {
-        state.traced = LineTracer.trace(getImageData(), {});
-        render(performance.now() - t0);
-      } catch (err) {
-        setStatus('Trace failed: ' + err.message, true);
-      }
-    }, 30);
+    if (state.tracing && state.worker) {
+      // a new request supersedes a running trace — kill it, don't queue
+      state.worker.terminate();
+      state.worker = null;
+    }
+    state.job++;
+    const job = state.job;
+    state.tracing = true;
+    showProgress(0.02, 'starting');
+    t0 = performance.now();
+    const imgData = getImageData();
+    const opts = currentOpts();
+    const w = getWorker();
+    if (w) {
+      w.postMessage(
+        { job, buf: imgData.data.buffer, width: imgData.width, height: imgData.height, opts },
+        [imgData.data.buffer]
+      );
+    } else {
+      setTimeout(() => { // let the status paint before blocking
+        if (job !== state.job) return;
+        try { finishTrace(LineTracer.trace(imgData, opts)); }
+        catch (err) { traceFailed(err.message); }
+      }, 30);
+    }
+  }
+
+  function onWorkerMsg(e) {
+    const m = e.data;
+    if (m.job !== state.job) return; // superseded
+    if (m.type === 'progress') showProgress(m.f, m.label);
+    else if (m.type === 'done') finishTrace(m.traced);
+    else if (m.type === 'error') traceFailed(m.message);
+  }
+
+  $('cancelBtn').onclick = () => {
+    state.job++; // invalidate anything in flight
+    if (state.worker) { state.worker.terminate(); state.worker = null; }
+    state.tracing = false;
+    hideProgress();
+    setStatus('Trace cancelled.');
+  };
+
+  function showProgress(f, label) {
+    $('progressRow').classList.add('visible');
+    $('progressBar').firstElementChild.style.width = Math.round(f * 100) + '%';
+    $('progressLabel').textContent = label || '';
+    status.innerHTML = '';
+  }
+  function hideProgress() { $('progressRow').classList.remove('visible'); }
+
+  function traceFailed(message) {
+    state.tracing = false;
+    hideProgress();
+    setStatus('Trace failed: ' + message, true);
+  }
+
+  function finishTrace(traced) {
+    state.tracing = false;
+    hideProgress();
+    state.traced = traced;
+    // mirror the automatically chosen sharpening in the slider so the user
+    // can see it happened and take over from there
+    if (state.autoSharpen) {
+      $('sharpen').value = Math.round((traced.sharpenApplied || 0) * 100);
+      $('sharpenOut').textContent = traced.sharpenApplied
+        ? 'auto ' + Math.round(traced.sharpenApplied * 100) + '%' : 'auto';
+    }
+    if (state.binUrl) { URL.revokeObjectURL(state.binUrl); state.binUrl = null; }
+    render(performance.now() - t0);
   }
 
   function render(traceMs) {
@@ -2064,10 +2522,21 @@ if (typeof module !== 'undefined' && module.exports) module.exports = LineTracer
     const outW = state.image.naturalWidth / state.exportScale;
     const outH = state.image.naturalHeight / state.exportScale;
     const thickness = (+$('thickness').value || 100) / 100;
-    const { svg, pathCount, pointCount, weights } = LineTracer.buildSvg(t.chains, t.width, t.height, {
+    const detailV = +$('detail').value; // 50 = auto; higher keeps more anchors
+    // hard cap: an extreme trace (photo, texture) can emit thousands of
+    // fragments — keep the longest lines so Figma import stays usable
+    let chains = t.chains, dropped = 0;
+    if (chains.length > PATH_CAP) {
+      dropped = chains.length - PATH_CAP;
+      chains = chains.slice()
+        .sort((a, b) => (b.geomLength || b.points.length) - (a.geomLength || a.points.length))
+        .slice(0, PATH_CAP);
+    }
+    const { svg, pathCount, pointCount, weights } = LineTracer.buildSvg(chains, t.width, t.height, {
       simplify: 1,
       smooth: true,
       minLength: 3,
+      detail: Math.pow(3, (50 - detailV) / 50),
       stroke: t.inkColor,
       strokeWidth: Math.max(0.1, t.avgStrokeWidth * (outW / t.width) * thickness),
       matchWeights: true,
@@ -2078,15 +2547,43 @@ if (typeof module !== 'undefined' && module.exports) module.exports = LineTracer
     state.svg = svg;
     if (state.lastBlobUrl) URL.revokeObjectURL(state.lastBlobUrl);
     state.lastBlobUrl = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
-    traceImg.src = state.lastBlobUrl;
+    if (!$('binView').checked) traceImg.src = state.lastBlobUrl;
+    else showBinarized();
     const modeNames = { dark: 'dark lines', light: 'light lines', alpha: 'transparency' };
+    const prepNames = { blur: 'denoised', sharp: 'sharpened', adaptive: 'lighting corrected' };
     setStatus(
       `${pathCount} lines · ${pointCount} anchors · ${weights.length} weight${weights.length > 1 ? 's' : ''}` +
       (traceMs ? ` · ${Math.round(traceMs)} ms` : '') +
-      ` · <span class="mode">${modeNames[t.mode]}</span>`
+      ` · <span class="mode">${modeNames[t.mode]}${prepNames[t.preprocess] ? ' · ' + prepNames[t.preprocess] : ''}</span>`
     );
+    const notes = (t.warnings || []).slice();
+    if (dropped) notes.push(`Very busy image: kept the ${PATH_CAP} longest lines (${dropped} tiny fragments dropped).`);
+    else if (pathCount > PATH_WARN) notes.push(`${pathCount} paths — Figma may get slow. Raising Detail simplification or cropping the image helps.`);
+    warn.textContent = notes.join(' ');
+    warn.classList.toggle('visible', notes.length > 0);
     $('importBtn').disabled = pathCount === 0;
     $('copyBtn').disabled = pathCount === 0;
+    syncHeight();
+  }
+
+  // binarized intermediate view — "what did the tracer actually see?"
+  function showBinarized() {
+    const t = state.traced;
+    if (!t) return;
+    if (!state.binUrl) {
+      const canvas = document.createElement('canvas');
+      canvas.width = t.width; canvas.height = t.height;
+      const ctx = canvas.getContext('2d');
+      const id = ctx.createImageData(t.width, t.height);
+      for (let i = 0; i < t.ink.length; i++) {
+        const v = t.ink[i] ? 0 : 255;
+        id.data[i * 4] = id.data[i * 4 + 1] = id.data[i * 4 + 2] = v;
+        id.data[i * 4 + 3] = 255;
+      }
+      ctx.putImageData(id, 0, 0);
+      state.binUrl = canvas.toDataURL('image/png');
+    }
+    traceImg.src = state.binUrl;
   }
 
   function setStatus(html, isError) {
@@ -2095,10 +2592,44 @@ if (typeof module !== 'undefined' && module.exports) module.exports = LineTracer
   }
 
   // ---------- controls ----------
+  // cheap controls: re-render only (no re-trace)
   $('thickness').addEventListener('input', () => {
     $('thicknessOut').textContent = $('thickness').value + '%';
     render();
   });
+  $('detail').addEventListener('input', () => {
+    const v = +$('detail').value;
+    $('detailOut').textContent = v === 50 ? 'auto' : (v > 50 ? '+' : '') + (v - 50);
+    render();
+  });
+  $('binView').addEventListener('change', () => {
+    if ($('binView').checked) showBinarized();
+    else if (state.lastBlobUrl) traceImg.src = state.lastBlobUrl;
+  });
+
+  // raster controls: re-trace (debounced — sliders fire while dragging)
+  let retraceTimer = 0;
+  const queueRetrace = () => {
+    clearTimeout(retraceTimer);
+    retraceTimer = setTimeout(retrace, 300);
+  };
+  $('thrOff').addEventListener('input', () => {
+    const v = +$('thrOff').value;
+    $('thrOffOut').textContent = v === 0 ? 'auto' : (v > 0 ? '+' : '') + v;
+    queueRetrace();
+  });
+  $('bridge').addEventListener('input', () => {
+    const v = +$('bridge').value;
+    $('bridgeOut').textContent = v === 0 ? 'off' : v === 55 ? 'auto' : v + '%';
+    queueRetrace();
+  });
+  $('sharpen').addEventListener('input', () => {
+    state.autoSharpen = false;
+    const v = +$('sharpen').value;
+    $('sharpenOut').textContent = v === 0 ? 'off' : v + '%';
+    queueRetrace();
+  });
+  $('invert').addEventListener('change', queueRetrace);
 
   $('importBtn').onclick = () => {
     if (!state.svg) return;
