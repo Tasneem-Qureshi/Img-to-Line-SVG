@@ -1,0 +1,112 @@
+{
+ "tier": "quick",
+ "clean": {
+  "96": {
+   "allPass": 36.7,
+   "pathCount": 65.3,
+   "centerline": 61.9,
+   "width": 99.3,
+   "anchors": 99.3,
+   "grammar": 84.4,
+   "topology": 52.4,
+   "finishing": 81.6
+  },
+  "240": {
+   "allPass": 36.1,
+   "pathCount": 56.5,
+   "centerline": 53.7,
+   "width": 98.6,
+   "anchors": 98.6,
+   "grammar": 83.7,
+   "topology": 46.9,
+   "finishing": 80.3
+  },
+  "480": {
+   "allPass": 42.2,
+   "pathCount": 66.7,
+   "centerline": 61.9,
+   "width": 98.6,
+   "anchors": 98.6,
+   "grammar": 84.4,
+   "topology": 53.7,
+   "finishing": 84.4
+  }
+ },
+ "degraded": {
+  "down": {
+   "allPass": 37.3,
+   "pathCount": 78,
+   "centerline": 81.4,
+   "width": 100,
+   "anchors": 100,
+   "grammar": 86.4,
+   "topology": 67.8,
+   "finishing": 79.7
+  },
+  "blur": {
+   "allPass": 40.7,
+   "pathCount": 81.4,
+   "centerline": 88.1,
+   "width": 98.3,
+   "anchors": 98.3,
+   "grammar": 86.4,
+   "topology": 59.3,
+   "finishing": 78
+  },
+  "rot": {
+   "allPass": 49.2,
+   "pathCount": 79.7,
+   "centerline": 88.1,
+   "width": 98.3,
+   "anchors": 98.3,
+   "grammar": 83.1,
+   "topology": 66.1,
+   "finishing": 81.4
+  },
+  "jpeg": {
+   "allPass": 49.2,
+   "pathCount": 83.1,
+   "centerline": 91.5,
+   "width": 100,
+   "anchors": 100,
+   "grammar": 84.7,
+   "topology": 67.8,
+   "finishing": 83.1
+  }
+ },
+ "fullClean": {
+  "96": {
+   "allPass": 41.4,
+   "pathCount": 65.1,
+   "centerline": 67.2,
+   "width": 99.7,
+   "anchors": 98.1,
+   "grammar": 84,
+   "topology": 54.8,
+   "finishing": 85.4
+  },
+  "240": {
+   "allPass": 36.5,
+   "pathCount": 57.7,
+   "centerline": 57.2,
+   "width": 99.5,
+   "anchors": 98.5,
+   "grammar": 82.9,
+   "topology": 51.4,
+   "finishing": 84.1
+  },
+  "480": {
+   "allPass": 42.8,
+   "pathCount": 66,
+   "centerline": 65.7,
+   "width": 99.6,
+   "anchors": 98.4,
+   "grammar": 84.2,
+   "topology": 56.9,
+   "finishing": 88.6
+  },
+  "when": "2026-09-01T17:08:00+02:00",
+  "icons": 1173,
+  "note": "release tier: node test/run-all.js --full"
+ }
+}

@@ -135,6 +135,35 @@ test harness extracts and runs that exact block in Node:
 node test/trace-test.js
 ```
 
+### The ratchet — no change ships below baseline
+
+One command runs everything: the unit/scenario suite, the icon-corpus
+round-trip harness (clean), and the degraded runs (downscale, JPEG q60,
+1px blur, 0.5-degree rotation), then compares every pass rate against the
+checked-in `test/baseline.json`:
+
+```sh
+node test/run-all.js
+```
+
+- quick tier by default (stratified 147-icon subset, ~20 min);
+  `--full` runs all 1,173 corpus icons (~1 h) for release gating
+- **rule: if ANY metric drops below `test/baseline.json`, the change does
+  not ship** (`run-all` exits non-zero and prints the drops)
+- when a run improves, lock the new numbers in with `--update-baseline`
+- pass thresholds are checked in at `test/corpus-harness/thresholds.json`
+  (a stricter clean tier and a documented degraded tier)
+- every run regenerates `test/corpus-report/gallery-<mode>.html` — the
+  worst-10 side-by-side gallery, so visual drift is one glance away
+- every bad trace found in the wild follows the test-first policy in
+  `test/failures/README.md`: check in the image + a failing assertion
+  BEFORE the fix
+
+The corpus itself (`test/corpus-untitled/`, private Untitled UI icons) is
+gitignored and never committed; the committed ground-truth fixtures come
+from Lucide (ISC) in `test/fixtures/lucide/`. Aggregate corpus statistics
+live in `CONSTRUCTION_RULES.md`.
+
 201 checks over synthetic images (lines, circles, junctions, crossings,
 dashed stitching, dots, wobbly strokes, transparent/inverted variants,
 pokes, knots, collapsed loops, weight fidelity, icon-rule snapping, filled

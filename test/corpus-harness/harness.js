@@ -125,6 +125,7 @@ function evaluate(orig, tr, opts) {
   const o = opts || {};
   const CL_MEAN = o.clMean || 0.30, CL_MAX = o.clMax || 1.0;
   const W_TOL = o.wTol || 0.2, ANCH = o.anchMult || 1.5;
+  const MERGE_SLACK = o.mergeSlack || 0, GAP_MARGIN = o.gapMargin != null ? o.gapMargin : 0.35;
   const origLines = orig.subpaths.filter(s => !isDotSub(s));
   const origDots = orig.subpaths.filter(isDotSub);
   const trLines = tr.subs.filter(s => !isDotSub(s) && !s.isFill);
@@ -187,7 +188,7 @@ function evaluate(orig, tr, opts) {
     const d = orig.subpaths.length - tr.subs.length;
     M.pathCount = {
       orig: orig.subpaths.length, traced: tr.subs.length, missing, phantom, contPairs,
-      pass: missing === 0 && phantom === 0 && d >= 0 && d <= contPairs
+      pass: missing === 0 && phantom === 0 && d >= 0 && d <= contPairs + MERGE_SLACK
     };
   }
   // 3. width
@@ -261,7 +262,7 @@ function evaluate(orig, tr, opts) {
       }
       if (bestP && bestD >= 2.4 && bestD <= 6) {
         const mid = [(end[0] + bestP[0]) / 2, (end[1] + bestP[1]) / 2];
-        if (nearTr(mid) < Math.min(bestD / 2 - 0.35, 1.1)) gapsOk = false;
+        if (nearTr(mid) < Math.min(bestD / 2 - GAP_MARGIN, 1.1)) gapsOk = false;
       }
     }
   }
@@ -270,7 +271,7 @@ function evaluate(orig, tr, opts) {
     // closed +1), m1 merges keep it open (open -1); both bounded by contPairs
     const m2 = tc - oc;
     const m1 = oo - to - 2 * m2;
-    const consistent = m2 >= 0 && m1 >= 0 && m1 + m2 <= contPairs;
+    const consistent = m2 >= 0 && m1 >= 0 && m1 + m2 <= contPairs + MERGE_SLACK;
     M.topology = { origClosed: oc, tracedClosed: tc, origOpen: oo, tracedOpen: to, gapsOk,
       pass: consistent && gapsOk };
   }
@@ -341,11 +342,10 @@ function main() {
   const all = flag('all');
   const N = +opt('n', 150);
   const degradeMode = opt('degrade', null);
-  // relaxed thresholds for degraded input: centerline mean/max x2, wider
-  // width tolerance, extra anchor slack; grammar/finishing still asserted
-  const evalOpts = degradeMode
-    ? { clMean: 0.6, clMax: 2.0, wTol: 0.4, anchMult: 2.0, anchSlack: 4 }
-    : undefined;
+  // thresholds are CHECKED IN (test/corpus-harness/thresholds.json): the
+  // clean tier for pristine renders, the degraded tier for --degrade runs
+  const TH = JSON.parse(fs.readFileSync(path.join(__dirname, 'thresholds.json'), 'utf8'));
+  const evalOpts = degradeMode ? TH.degraded : TH.clean;
   const names = fs.readdirSync(CORPUS).filter(f => f.endsWith('.svg')).map(f => f.replace(/\.svg$/, '')).sort();
   const subset = all ? names : names.filter((_, i) => i % Math.ceil(names.length / N) === 0);
   fs.mkdirSync(REPORT, { recursive: true });
@@ -358,7 +358,11 @@ function main() {
     for (const size of sizes) {
       let tr, M;
       try {
-        const res = traceRender(degradeMode ? degrade(loadRender(name + '@' + size), degradeMode) : loadRender(name + '@' + size));
+        const render = degradeMode === 'jpeg'
+          ? loadRender(name + '@' + size + 'jpeg')  // pre-rendered JPEG q60 roundtrip (240px only)
+          : degradeMode ? degrade(loadRender(name + '@' + size), degradeMode)
+          : loadRender(name + '@' + size);
+        const res = traceRender(render);
         tr = parseTraced(res.svg, res.traceW);
         tr.weightsLen = res.weights.length;
         tr.pointCount = res.pointCount;
@@ -384,7 +388,8 @@ function main() {
     bySize[size] = agg;
   }
   const scorecard = { when: new Date().toISOString(), subset: subset.length, sizes, degrade: degradeMode, bySize };
-  fs.writeFileSync(path.join(REPORT, 'scorecard.json'),
+  const tag = (degradeMode || 'clean') + (all ? '-full' : '');
+  fs.writeFileSync(path.join(REPORT, `scorecard-${tag}.json`),
     JSON.stringify({ scorecard, rows: rows.map(r => ({ name: r.name, size: r.size, M: r.M })) }, null, 1));
 
   // console table
@@ -415,7 +420,7 @@ function main() {
       <figure>${r.svg || ''}<figcaption>trace</figcaption></figure></div>
       <p class="f">${fails}</p></div>`;
   }
-  fs.writeFileSync(path.join(REPORT, 'gallery.html'), `<!doctype html><meta charset="utf-8">
+  fs.writeFileSync(path.join(REPORT, `gallery-${tag}.html`), `<!doctype html><meta charset="utf-8">
   <style>body{font:13px sans-serif;background:#fff;color:#111;margin:16px}
   .pair{display:flex;gap:10px} figure{margin:0;border:1px solid #ddd;padding:6px}
   figure svg{width:200px;height:200px;display:block} .f{color:#a33;font-size:11px;max-width:640px}

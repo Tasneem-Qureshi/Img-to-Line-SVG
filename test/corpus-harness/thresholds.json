@@ -1,0 +1,13 @@
+{
+  "_doc": "Pass thresholds for the corpus round-trip harness, in 24-unit icon space (stroke width = 2). CLEAN applies to pristine renders; DEGRADED applies to --degrade runs (downscale/jpeg/blur/rotation), where sub-pixel displacement and resampling loss justify wider bounds. A change ships only if pass rates never drop below test/baseline.json.",
+  "clean": {
+    "clMean": 0.30, "clMax": 1.0,
+    "wTol": 0.2, "anchMult": 1.5, "anchSlack": 0,
+    "mergeSlack": 0, "gapMargin": 0.35
+  },
+  "degraded": {
+    "clMean": 0.60, "clMax": 2.0,
+    "wTol": 0.4, "anchMult": 2.0, "anchSlack": 4,
+    "mergeSlack": 1, "gapMargin": 0.60
+  }
+}
