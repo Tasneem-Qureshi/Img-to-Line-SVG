@@ -889,10 +889,17 @@ const LineTracer = (() => {
                 Math.hypot(cand[0] - pr.B.p[0], cand[1] - pr.B.p[1]) < reach) apex = cand;
           }
           if (!jointInked(pr.A.p, apex, pr.B.p)) continue;
+          // restore trimmed junction reach before sealing: a closed chain
+          // never receives the end-extension pass, so trim cuts would stay
+          // as holes in the ring
+          let cpts = c.points;
+          if (c.trim && c.trim[0]) cpts = [c.trim[0].p].concat(cpts);
+          if (c.trim && c.trim[1]) cpts = cpts.concat([c.trim[1].p]);
           list[pr.A.ci] = Object.assign({}, c, {
             closed: true,
-            points: c.points.concat([apex]),
-            forced: (c.forced || []).concat([apex])
+            points: cpts.concat([apex]),
+            forced: (c.forced || []).concat([apex]),
+            trim: [null, null]
           });
           usedC.add(kA);
           usedC.add(kB);

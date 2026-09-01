@@ -3,39 +3,39 @@
  "clean": {
   "96": {
    "allPass": 36.7,
-   "pathCount": 65.3,
+   "pathCount": 68.7,
    "centerline": 61.9,
    "width": 99.3,
    "anchors": 99.3,
    "grammar": 84.4,
-   "topology": 52.4,
+   "topology": 53.1,
    "finishing": 81.6
   },
   "240": {
    "allPass": 36.1,
-   "pathCount": 56.5,
+   "pathCount": 59.9,
    "centerline": 53.7,
    "width": 98.6,
    "anchors": 98.6,
    "grammar": 83.7,
-   "topology": 46.9,
+   "topology": 47.6,
    "finishing": 80.3
   },
   "480": {
    "allPass": 42.2,
-   "pathCount": 66.7,
+   "pathCount": 70.7,
    "centerline": 61.9,
    "width": 98.6,
    "anchors": 98.6,
    "grammar": 84.4,
-   "topology": 53.7,
+   "topology": 54.4,
    "finishing": 84.4
   }
  },
  "degraded": {
   "down": {
    "allPass": 37.3,
-   "pathCount": 78,
+   "pathCount": 79.7,
    "centerline": 81.4,
    "width": 100,
    "anchors": 100,
@@ -45,7 +45,7 @@
   },
   "blur": {
    "allPass": 40.7,
-   "pathCount": 81.4,
+   "pathCount": 83.1,
    "centerline": 88.1,
    "width": 98.3,
    "anchors": 98.3,
@@ -55,7 +55,7 @@
   },
   "rot": {
    "allPass": 49.2,
-   "pathCount": 79.7,
+   "pathCount": 81.4,
    "centerline": 88.1,
    "width": 98.3,
    "anchors": 98.3,
@@ -65,7 +65,7 @@
   },
   "jpeg": {
    "allPass": 49.2,
-   "pathCount": 83.1,
+   "pathCount": 84.7,
    "centerline": 91.5,
    "width": 100,
    "anchors": 100,

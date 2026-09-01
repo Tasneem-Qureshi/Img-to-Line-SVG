@@ -152,6 +152,7 @@ function evaluate(orig, tr, opts) {
                     s.poly[Math.max(0, s.poly.length - 5)][1] - b[1]];
       ends.push({ p: a, d: dirA }, { p: b, d: dirB });
     }
+    const endUsed = new Set();
     for (let i = 0; i < ends.length; i++)
       for (let j = i + 1; j < ends.length; j++) {
         if ((i >> 1) === (j >> 1)) continue;
@@ -159,8 +160,30 @@ function evaluate(orig, tr, opts) {
         if (Math.hypot(A.p[0] - B.p[0], A.p[1] - B.p[1]) > 0.7) continue;
         const la = Math.hypot(A.d[0], A.d[1]) || 1, lb = Math.hypot(B.d[0], B.d[1]) || 1;
         const cos = (A.d[0] * B.d[0] + A.d[1] * B.d[1]) / (la * lb);
-        if (cos < -0.7) contPairs++; // one heads out where the other heads in
+        if (cos < -0.7) { contPairs++; endUsed.add(i); endUsed.add(j); } // continuation
       }
+    // an open end can also continue INTO another subpath's ink ALONG its
+    // local direction (a bar ending flush on an outline's straight run):
+    // the rendered stroke flows straight through — the authored split is
+    // unrecoverable from pixels, so merging there is equally legitimate
+    for (let i = 0; i < ends.length; i++) {
+      if (endUsed.has(i)) continue;
+      const E = ends[i];
+      const el = Math.hypot(E.d[0], E.d[1]) || 1;
+      let counted = false;
+      for (const t2 of orig.subpaths) {
+        if (counted) break;
+        const poly = t2.poly;
+        for (let k = 1; k < poly.length - 1; k++) {
+          if (Math.hypot(poly[k][0] - E.p[0], poly[k][1] - E.p[1]) > 0.7) continue;
+          if (t2 === origLines[i >> 1]) continue; // own subpath
+          const dx = poly[k + 1][0] - poly[k - 1][0], dy = poly[k + 1][1] - poly[k - 1][1];
+          const dl = Math.hypot(dx, dy) || 1;
+          const cos = Math.abs((E.d[0] * dx + E.d[1] * dy) / (el * dl));
+          if (cos > 0.85) { contPairs++; counted = true; break; }
+        }
+      }
+    }
   }
   // 2. centerline accuracy (orig -> traced), per-subpath coverage
   let sum = 0, n = 0, mx = 0, missing = 0;
