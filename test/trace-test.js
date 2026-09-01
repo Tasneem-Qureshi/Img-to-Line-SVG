@@ -1331,14 +1331,20 @@ console.log('39. scenario O: photos are flagged, never silent');
 
 console.log('40. gap bridging: heals breaks, never welds dashes');
 {
-  // a line broken by small gaps (~0.4x width of clear space) must heal
-  // (drawSegment caps add width/2 of ink beyond each endpoint)
-  const img = makeImage(500, 120, WHITE);
+  // a BLURRY line broken by small gaps (~0.4x width of clear space) must
+  // heal — auto-bridging only fires on measured-degraded sources; on a
+  // sharp image a clear gap between collinear strokes is authored (a dash,
+  // a badge cutout) and must never be welded
+  const imgSharp = makeImage(500, 120, WHITE);
   for (const [a, b] of [[40, 150], [164, 290], [304, 440]])
-    drawSegment(img, a, 60, b, 60, 10, BLACK);
+    drawSegment(imgSharp, a, 60, b, 60, 10, BLACK);
+  const img = gaussBlur(imgSharp, 2.2);
   const t1 = T.trace(img, {});
-  check('broken line healed to 1 chain', keptChains(t1, 6).length === 1,
+  check('broken blurry line healed to 1 chain', keptChains(t1, 6).length === 1,
     `got ${keptChains(t1, 6).length}`);
+  const tSharp = T.trace(imgSharp, { srcScale: 3 });
+  check('same gaps on a SHARP source stay authored (3 chains)',
+    keptChains(tSharp, 6).length === 3, `got ${keptChains(tSharp, 6).length}`);
   // dashes (clear gaps ~3x width) must NOT weld
   const img2 = makeImage(500, 120, WHITE);
   for (const [a, b] of [[40, 110], [150, 220], [260, 330], [370, 440]])
@@ -1346,7 +1352,7 @@ console.log('40. gap bridging: heals breaks, never welds dashes');
   const t2 = T.trace(img2, {});
   check('dashes stay separate (4 chains)', keptChains(t2, 6).length === 4,
     `got ${keptChains(t2, 6).length}`);
-  // bridge = 0 disables healing entirely
+  // bridge = 0 disables healing entirely (on the blurry source)
   const t3 = T.trace(img, { bridge: 0 });
   check('bridge=0 keeps fragments', keptChains(t3, 6).length === 3,
     `got ${keptChains(t3, 6).length}`);
@@ -1475,6 +1481,42 @@ console.log('44. thickness sweep keeps structure at 25% and 400%');
       Math.abs(r.weights[0] / base.r.weights[0] - th) < th * 0.02,
       `${r.weights[0]} vs base ${base.r.weights[0]}`);
     check(`x${th}: corners stay miter`, /stroke-linejoin="miter"/.test(r.svg));
+  }
+}
+
+console.log('45. round-trip vs open-licensed originals (Lucide, ISC)');
+{
+  // the corpus-harness metrics run against committed ground-truth SVGs:
+  // trace the 240px render and compare with the original vector source.
+  // Per-icon floors reflect what the tracer achieves today - regressions
+  // in any mechanism (junction routing, corners, width classing, votes)
+  // show up here against REAL professional icons.
+  const H = require(path.join(__dirname, 'corpus-harness', 'harness.js'));
+  const SP = require(path.join(__dirname, 'corpus-harness', 'svgpath.js'));
+  const zlib = require('zlib');
+  const CASES = {
+    heart: 'ALL', house: 'ALL', megaphone: 'ALL', scissors: 'ALL',
+    camera: ['pathCount', 'centerline', 'width', 'anchors', 'topology', 'finishing'],
+    settings: ['pathCount', 'centerline', 'width', 'anchors', 'topology', 'finishing'],
+    bell: ['pathCount', 'centerline', 'width', 'anchors', 'grammar'],
+    'square-arrow-up': ['width', 'anchors', 'grammar'],
+  };
+  for (const [name, want] of Object.entries(CASES)) {
+    const dir = path.join(__dirname, 'fixtures', 'lucide');
+    const orig = SP.parseIconSvg(fs.readFileSync(path.join(dir, name + '.svg'), 'utf8'));
+    for (const s of orig.subpaths) s.poly = SP.flattenSubpath(s, 4);
+    const raw = zlib.gunzipSync(fs.readFileSync(path.join(dir, name + '@240.rgba.gz')));
+    const w = raw.readUInt32LE(0), h = raw.readUInt32LE(4);
+    const img = { width: w, height: h, data: new Uint8ClampedArray(raw.buffer, raw.byteOffset + 8, w * h * 4) };
+    const res = H.traceRender(img);
+    const tr = H.parseTraced(res.svg, res.traceW);
+    tr.weightsLen = res.weights.length;
+    const M = H.evaluate(orig, tr);
+    const metrics = want === 'ALL'
+      ? ['pathCount', 'centerline', 'width', 'anchors', 'grammar', 'topology', 'finishing']
+      : want;
+    for (const m of metrics)
+      check(`lucide ${name}: ${m}`, M[m].pass, JSON.stringify(M[m]).slice(0, 120));
   }
 }
 

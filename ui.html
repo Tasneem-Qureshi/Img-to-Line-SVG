@@ -627,7 +627,21 @@ const LineTracer = (() => {
   // neighbors chop drawn lines into fragments — pair up ends that meet at
   // the same junction going in opposite directions with similar widths, so
   // lines flow through intersections like in the original drawing.
-  function mergeChains(chains, bridgeMult) {
+  function mergeChains(chains, bridgeMult, inkCtx) {
+    // corner joins reconnect strokes whose skeleton RETRACTED from a sharp
+    // corner — there the source ink still covers the joint. An authored gap
+    // (badge cutout, dash) has NO ink between the ends: never join across it.
+    const jointInked = (a, apex, b) => {
+      if (!inkCtx) return true;
+      const at = p => {
+        const x = Math.round(p[0] - 0.5), y = Math.round(p[1] - 0.5);
+        return x >= 0 && y >= 0 && x < inkCtx.w && y < inkCtx.h && inkCtx.ink[y * inkCtx.w + x] === 1;
+      };
+      for (const [p, q] of [[a, apex], [apex, b]])
+        for (const f of [0.33, 0.66])
+          if (!at([p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f])) return false;
+      return true;
+    };
     const dirAt = (c, end) => {
       const pts = c.points, n = pts.length;
       const a = end === 0 ? pts[0] : pts[n - 1];
@@ -688,7 +702,7 @@ const LineTracer = (() => {
           ops.push({ close: pr.A.ci });
         } else {
           if (usedChain.has(pr.A.ci) || usedChain.has(pr.B.ci)) continue;
-          ops.push({ a: pr.A, b: pr.B });
+          ops.push({ a: pr.A, b: pr.B, cos: pr.cos });
           usedChain.add(pr.A.ci);
           usedChain.add(pr.B.ci);
         }
@@ -722,13 +736,40 @@ const LineTracer = (() => {
         // bridge trimmed ends through the junction center so the fitted
         // curve passes where the strokes actually cross
         const trA = A.trim && A.trim[op.a.e], trB = B.trim && B.trim[op.b.e];
-        const seam = trA && trB ? [[(trA.p[0] + trB.p[0]) / 2, (trA.p[1] + trB.p[1]) / 2]]
+        let seam = trA && trB ? [[(trA.p[0] + trB.p[0]) / 2, (trA.p[1] + trB.p[1]) / 2]]
           : trA ? [trA.p] : trB ? [trB.p] : [];
+        let seamForced = null;
+        // a BENT continuation (a chevron: two arms fused into one wedge of
+        // ink) does not pass through the pool centroid — its true apex is at
+        // the wedge's ink tip along the opening's bisector. Probe for it.
+        if (seam.length && inkCtx && op.cos > -0.97 && op.cos < -0.5) {
+          const dA = dirAt(list[op.a.ci], op.a.e), dB = dirAt(list[op.b.ci], op.b.e);
+          let bx = -(dA[0] + dB[0]), by = -(dA[1] + dB[1]);
+          const bl = Math.hypot(bx, by);
+          if (bl > 0.3) {
+            bx /= bl; by /= bl;
+            const wA = ((A.width || 2) + (B.width || 2)) / 2;
+            const at = p => {
+              const x = Math.round(p[0] - 0.5), y = Math.round(p[1] - 0.5);
+              return x >= 0 && y >= 0 && x < inkCtx.w && y < inkCtx.h &&
+                     inkCtx.ink[y * inkCtx.w + x] === 1;
+            };
+            const s0 = seam[0];
+            let run = 0;
+            const maxRun = wA * 4;
+            while (run < maxRun && at([s0[0] + bx * (run + 1), s0[1] + by * (run + 1)])) run += 1;
+            if (run > wA * 0.55 && run < maxRun) {
+              const apex = [s0[0] + bx * (run - wA / 2), s0[1] + by * (run - wA / 2)];
+              seam = [apex];
+              seamForced = apex;
+            }
+          }
+        }
         const gap = Math.hypot(ptsB[0][0] - ptsA[ptsA.length - 1][0], ptsB[0][1] - ptsA[ptsA.length - 1][1]);
         const ew = ch => ch.endWidths || [ch.width || 1, ch.width || 1];
         added.push({
           closed: false,
-          forced: (A.forced || []).concat(B.forced || []),
+          forced: (A.forced || []).concat(B.forced || [], seamForced ? [seamForced] : []),
           points: ptsA.concat(seam, ptsB),
           width: ((A.width || 1) * lenA + (B.width || 1) * lenB) / ((lenA + lenB) || 1),
           geomLength: lenA + lenB + gap,
@@ -761,10 +802,29 @@ const LineTracer = (() => {
           });
         }
       });
+      // a junction-attached end whose junction is STILL POPULATED by other
+      // strokes (besides its would-be join partner) belongs to the junction
+      // machinery — it terminates there via trim extension. Corner-joining
+      // it to some nearby free tip steals it across the junction and
+      // doubles the path back on itself.
+      const populatedFor = (E, exclCi) => {
+        if (E.free) return false;
+        const tr = list[E.ci].trim && list[E.ci].trim[E.e];
+        if (!tr) return false;
+        const rr = (tr.r || E.width) * 1.05;
+        for (let ci = 0; ci < list.length; ci++) {
+          if (ci === E.ci || ci === exclCi) continue;
+          const pts = list[ci].points;
+          for (let k = 0; k < pts.length; k += 4)
+            if (Math.hypot(pts[k][0] - tr.p[0], pts[k][1] - tr.p[1]) < rr) return true;
+        }
+        return false;
+      };
       const cPairs = [];
       for (let i = 0; i < ends.length; i++) {
         for (let j = i + 1; j < ends.length; j++) {
           const A = ends[i], B = ends[j];
+          if (populatedFor(A, B.ci) || populatedFor(B, A.ci)) continue;
           // at least one side must be a genuine break (free end) —
           // junction-junction joins belong to the junction machinery and
           // misroute (e.g. a globe rim onto its meridian). The exception:
@@ -828,6 +888,7 @@ const LineTracer = (() => {
             if (Math.hypot(cand[0] - pr.A.p[0], cand[1] - pr.A.p[1]) < reach &&
                 Math.hypot(cand[0] - pr.B.p[0], cand[1] - pr.B.p[1]) < reach) apex = cand;
           }
+          if (!jointInked(pr.A.p, apex, pr.B.p)) continue;
           list[pr.A.ci] = Object.assign({}, c, {
             closed: true,
             points: c.points.concat([apex]),
@@ -859,6 +920,7 @@ const LineTracer = (() => {
                 Math.hypot(cand[0] - pr.B.p[0], cand[1] - pr.B.p[1]) < reach) apex = cand;
           }
         }
+        if (!jointInked(pr.A.p, apex, pr.B.p)) continue;
         addedC.push({
           closed: false,
           forced: (A.forced || []).concat(B.forced || [], [apex]),
@@ -1839,8 +1901,14 @@ const LineTracer = (() => {
           // skeleton poke is a thin bump on the parent stroke's flank, while
           // a real feature (a bell's brim tip, a serif) carries close to the
           // drawing's stroke weight even when its tip tapers
+          // "clearly exits the junction pool": the pool's radius is jw/2, so
+          // full-width ink reaching past ~0.6x jw is a drawn stroke, not a
+          // skeleton spur (spurs are thin, or live inside the pool). Fuzz
+          // spurs on noisy sources can reach similar lengths, but they stay
+          // short relative to the drawing's own stroke weight.
           const realStub = o.avgWidth > 0 &&
-            c.width >= o.avgWidth * 0.45 && len > jw;
+            c.width >= o.avgWidth * 0.45 && len > jw * 0.6 &&
+            len >= o.avgWidth * 0.85;
           const lim = jw > c.width * 1.6
             ? Math.max(1.5 * c.width, 2.2 * jw)
             : 1.5 * c.width + 2;
@@ -1968,6 +2036,17 @@ const LineTracer = (() => {
           // a run far below the round-join radius means the probe started at
           // a junction pool or off the ink — abstain instead of voting round
           if (rBis < wHalf * 0.6) continue;
+          // shallow turns barely separate round from miter — abstain
+          if (tip - wHalf < Math.max(2, wHalf * 0.22)) continue;
+          // both legs must be CLEAN single strokes near the corner: two
+          // strokes converging at a shallow angle fuse into a solid wedge
+          // whose ink reads like a miter tip
+          const armClean = dir => {
+            const q = [cr.p[0] + dir[0] * wHalf * 2, cr.p[1] + dir[1] * wHalf * 2];
+            const pu = [-dir[1], dir[0]];
+            return runFrom(q, pu) + runFrom(q, [-pu[0], -pu[1]]) < wHalf * 3;
+          };
+          if (!armClean([-cr.u[0], -cr.u[1]]) || !armClean([cr.v[0], cr.v[1]])) continue;
           // pixel quantization clips diagonal runs by ~0.7px, so the gate
           // sits well below the geometric midpoint between round and miter
           if (rBis > wHalf + (tip - wHalf) * 0.3) mj++;
@@ -2036,6 +2115,7 @@ const LineTracer = (() => {
     if (o.invert && mode !== 'alpha') mode = mode === 'dark' ? 'light' : 'dark';
     const warnings = [];
     let threshold, bin, skel, preprocess = 'none', sharpenApplied = 0, tuning = null;
+    let blurGrade = 'soft'; // manual-threshold path: keep bridging permissive
     if (o.threshold != null) {
       threshold = o.threshold;
       bin = fillHoles(binarize(img, threshold, mode), img.width, img.height);
@@ -2091,6 +2171,7 @@ const LineTracer = (() => {
       };
       progress(0.1, 'tuning threshold');
       const blurInfo = measureBlur(proxy, o.srcScale);
+      blurGrade = blurInfo.grade;
       const shAmt = o.sharpen === 0 ? 0
         : (typeof o.sharpen === 'number' ? o.sharpen
         : (blurInfo.grade !== 'sharp' ? 1.6 : 0));
@@ -2445,11 +2526,15 @@ const LineTracer = (() => {
       if (hits >= 3) c.debris = true;
     }
 
-    // gap bridging is a multiplier of the local pair width (0 = off)
+    // gap bridging is a multiplier of the local pair width (0 = off).
+    // AUTO bridging only fires on measured-degraded sources: on a SHARP
+    // image a clear gap between collinear strokes is authored (a dash, a
+    // badge cutout) — healing it would weld intentional gaps.
     const bridgeMult = o.bridge === 0 ? 0
-      : (typeof o.bridge === 'number' ? o.bridge : 0.55);
+      : (typeof o.bridge === 'number' ? o.bridge
+      : (blurGrade !== 'sharp' ? 1.5 : 0));
     progress(0.75, 'merging junctions');
-    chains = mergeChains(chains, bridgeMult);
+    chains = mergeChains(chains, bridgeMult, { ink: bin, w: img.width, h: img.height });
 
     progress(0.9, 'finishing');
     // Cap finishing at free line ends. The skeleton always stops ~width/2
