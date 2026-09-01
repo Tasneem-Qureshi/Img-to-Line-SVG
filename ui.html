@@ -76,6 +76,7 @@
   }
   .ctl label { color: var(--text-2); }
   .ctl output { text-align: right; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  #autoInfo { margin-top: 8px; color: var(--text-2); }
   .checks { display: flex; gap: 16px; margin-top: 10px; color: var(--text-2); }
   .checks label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
   .checks input { accent-color: var(--accent); }
@@ -133,6 +134,7 @@
     <label><input type="checkbox" id="invert"> Invert</label>
     <label><input type="checkbox" id="binView"> Show binarized</label>
   </div>
+  <div id="autoInfo"></div>
 </details>
 <div id="progressRow">
   <div id="progressBar"><i></i></div>
@@ -297,7 +299,11 @@ const LineTracer = (() => {
 
   // Blur measure: Laplacian variance (normalized by dynamic range) — low
   // values mean soft edges. Classified against fixture-calibrated cutoffs.
-  function measureBlur(img) {
+  // srcScale: how much the working image was upscaled from the source.
+  // Upscaling widens every edge, so a crisp small icon measures "soft" at
+  // working resolution — the Laplacian response scales back by the factor,
+  // grading the SOURCE's sharpness instead.
+  function measureBlur(img, srcScale) {
     const { width: w, height: h } = img;
     const g = toGray(img);
     let lo = 255, hi = 0;
@@ -313,7 +319,8 @@ const LineTracer = (() => {
         if (lap > 0.01) laps.push(lap);
       }
     laps.sort((a, b) => a - b);
-    const p95 = laps.length ? laps[Math.floor(laps.length * 0.95)] : 0;
+    const p95 = (laps.length ? laps[Math.floor(laps.length * 0.95)] : 0) *
+                Math.max(1, srcScale || 1);
     return { p95, grade: p95 > 0.5 ? 'sharp' : p95 > 0.22 ? 'soft' : 'severe' };
   }
 
@@ -760,8 +767,18 @@ const LineTracer = (() => {
           const A = ends[i], B = ends[j];
           // at least one side must be a genuine break (free end) —
           // junction-junction joins belong to the junction machinery and
-          // misroute (e.g. a globe rim onto its meridian)
-          if (!A.free && !B.free) continue;
+          // misroute (e.g. a globe rim onto its meridian). The exception:
+          // a junction where EXACTLY these two ends meet is an L-corner
+          // drawn as one stroke — no third arm, no machinery to defer to.
+          if (!A.free && !B.free) {
+            const jr = Math.max(6, (A.width + B.width) * 0.75);
+            if (Math.hypot(A.p[0] - B.p[0], A.p[1] - B.p[1]) > jr) continue;
+            let others = 0;
+            for (const E of ends)
+              if (E !== A && E !== B && !E.free &&
+                  Math.hypot(E.p[0] - A.p[0], E.p[1] - A.p[1]) < jr) others++;
+            if (others) continue;
+          }
           const gap = Math.hypot(A.p[0] - B.p[0], A.p[1] - B.p[1]);
           // thinning retracts from sharp corners by ~width/2 per side
           const baseLim = Math.max(6, (A.width + B.width) * 0.75);
@@ -1092,14 +1109,21 @@ const LineTracer = (() => {
     u = u.map(v => v / (total || 1));
     let bez = generateBezier(pts, first, last, u, tHat1, tHat2);
     let { maxDist, splitPoint } = maxFitError(pts, first, last, bez, u);
-    if (maxDist < tol * tol) { out.push(bez); return; }
-    if (maxDist < tol * tol * 16) { // close: re-parameterize a few times
+    if (maxDist < tol * tol * 16) {
+      // re-parameterize while it helps — even for fits already inside the
+      // tolerance: the first acceptable fit can still sit visibly off the
+      // centerline (tolerance is an anchor-economy knob, not a target), and
+      // polishing costs no extra anchors
+      let bestBez = bez, bestErr = maxDist, bestSplit = splitPoint;
       for (let it = 0; it < 4; it++) {
         u = u.map((uu, i) => newtonStep(bez, pts[first + i], uu));
         bez = generateBezier(pts, first, last, u, tHat1, tHat2);
         ({ maxDist, splitPoint } = maxFitError(pts, first, last, bez, u));
-        if (maxDist < tol * tol) { out.push(bez); return; }
+        if (maxDist < bestErr) { bestBez = bez; bestErr = maxDist; bestSplit = splitPoint; }
+        else break;
       }
+      bez = bestBez; maxDist = bestErr; splitPoint = bestSplit;
+      if (maxDist < tol * tol) { out.push(bez); return; }
     }
     if (depth > 24) { out.push(bez); return; }
     if (splitPoint <= first) splitPoint = first + 1;
@@ -1113,7 +1137,7 @@ const LineTracer = (() => {
 
   // Full chain -> few cubic segments. Splits at real corners (sharp turns)
   // so an "L" stays sharp while arcs become single flowing curves.
-  function fitChain(points, closed, tol, cornersOut, forcedPts) {
+  function fitChain(points, closed, tol, cornersOut, forcedPts, inkCtx) {
     const pts = [];
     for (const p of points)
       if (!pts.length || (p[0] - pts[pts.length - 1][0]) ** 2 + (p[1] - pts[pts.length - 1][1]) ** 2 > 1e-12)
@@ -1358,7 +1382,14 @@ const LineTracer = (() => {
     // corner detection: direction change measured across a window. The
     // window scales with the fit tolerance (~stroke width) so it spans the
     // rounded zone left by polyline smoothing and staircase steps alike.
-    const w = Math.max(2, Math.min(120, Math.round(Math.max(6, tol * 4)), n >> 3));
+    // the measurement window must SPAN the corner's rounded zone (~3.5x tol:
+    // thinning retraction + smoothing) or a true corner's turn measures
+    // diluted below the threshold; but non-max suppression must use a much
+    // smaller radius or close-by corners (an L-joint next to a diagonal
+    // transition) merge into one detection whose tangents point along the
+    // wrong legs.
+    const w = Math.max(2, Math.min(120, Math.round(Math.max(6, tol * 4.25)), n >> 3));
+    const wSup = Math.max(3, Math.min(w, Math.round(tol * 1.9)));
     const turn = i => {
       const a = closed ? pts[(i - w + n) % n] : pts[Math.max(0, i - w)];
       const b = pts[i];
@@ -1374,7 +1405,7 @@ const LineTracer = (() => {
       const t = turn(i);
       if (t < 0.95) continue; // < ~54°: a curve, not a corner (smoothing dilutes real corners)
       let isMax = true;
-      for (let k = 1; k <= w && isMax; k++) {
+      for (let k = 1; k <= wSup && isMax; k++) {
         const ir = closed ? (i + k) % n : Math.min(n - 1, i + k);
         const il = closed ? (i - k + n) % n : Math.max(0, i - k);
         if (turn(ir) > t || turn(il) >= t) isMax = false;
@@ -1394,6 +1425,96 @@ const LineTracer = (() => {
         if (!corners.some(ci => Math.abs(ci - bi) <= w)) corners.push(bi);
       }
       corners.sort((a, b) => a - b);
+    }
+    // rebuild each detected corner's true apex: thinning retracts from a
+    // convex corner by ~width/2 and smoothing rounds it further, so the
+    // polyline bends early and the fit renders a soft bulge where the source
+    // has a sharp joint. Intersect the two legs' tangents measured OUTSIDE
+    // the rounded zone and pull the corner (and its zone) onto them.
+    {
+      const idx = i => closed ? ((i % n) + n) % n : Math.max(0, Math.min(n - 1, i));
+      const inkOk = p => !inkCtx ||
+        (p[0] >= 0 && p[1] >= 0 && p[0] < inkCtx.w && p[1] < inkCtx.h &&
+         inkCtx.ink[Math.round(p[1] - 0.5) * inkCtx.w + Math.round(p[0] - 0.5)] === 1);
+      // a wide corner's turn profile can plateau and yield TWO detections a
+      // few points apart — each would rebuild with arms inside the shared
+      // rounded zone. Merge detections closer than the zone into one, but
+      // only when they turn the SAME way: opposite-turn neighbors (an S-jog,
+      // adjacent gear teeth) are genuinely distinct corners.
+      const zMerge = Math.round(tol * 4.25);
+      const turnSign = i => {
+        const a = pts[idx(i - 4)], b = pts[i], c2 = pts[idx(i + 4)];
+        return Math.sign((b[0] - a[0]) * (c2[1] - b[1]) - (b[1] - a[1]) * (c2[0] - b[0]));
+      };
+      for (let m = 0; m + 1 < corners.length; ) {
+        if (corners[m + 1] - corners[m] < zMerge &&
+            turnSign(corners[m]) === turnSign(corners[m + 1])) {
+          corners.splice(m, 2, Math.round((corners[m] + corners[m + 1]) / 2));
+        } else m++;
+      }
+      for (let m = 0; m < corners.length; m++) {
+        const ci = corners[m];
+        // tangent arms must stay clear of the NEIGHBORING corner's zone — a
+        // tangent measured across the next corner points along the wrong leg
+        // and projects the apex far past the true joint
+        let gapL, gapR;
+        if (closed) {
+          gapL = gapR = n;
+          if (corners.length > 1) {
+            const prev = corners[(m - 1 + corners.length) % corners.length];
+            const next = corners[(m + 1) % corners.length];
+            gapL = ((ci - prev + n) % n) || n;
+            gapR = ((next - ci + n) % n) || n;
+          }
+        } else {
+          gapL = m > 0 ? ci - corners[m - 1] : ci;
+          gapR = m < corners.length - 1 ? corners[m + 1] - ci : n - 1 - ci;
+        }
+        // the rounded zone spans ~0.85x the stroke width (thinning retraction
+        // + smoothing), i.e. ~3.4x tol — tangents must clear it, regardless
+        // of the (smaller) detection window
+        const zBase = Math.max(2, Math.round(tol * 4.25));
+        const zL = Math.max(2, Math.min(zBase, Math.floor(gapL * 0.45)));
+        const zR = Math.max(2, Math.min(zBase, Math.floor(gapR * 0.45)));
+        const armL = Math.min(Math.round(tol * 10), Math.floor(gapL * 0.85));
+        const armR = Math.min(Math.round(tol * 10), Math.floor(gapR * 0.85));
+        if (armL <= zL || armR <= zR) continue;
+        const aIn = pts[idx(ci - armL)], bIn = pts[idx(ci - zL)];
+        const aOut = pts[idx(ci + armR)], bOut = pts[idx(ci + zR)];
+        let ux = bIn[0] - aIn[0], uy = bIn[1] - aIn[1];
+        let vx = bOut[0] - aOut[0], vy = bOut[1] - aOut[1];
+        const ul = Math.hypot(ux, uy) || 1, vl = Math.hypot(vx, vy) || 1;
+        ux /= ul; uy /= ul; vx /= vl; vy /= vl;
+        const det = ux * vy - uy * vx;
+        if (Math.abs(det) < 0.25) continue; // near-parallel: no stable apex
+        // intersection of (bIn + t*u) and (bOut + s*v)
+        const dx = bOut[0] - bIn[0], dy = bOut[1] - bIn[1];
+        const t = (dx * vy - dy * vx) / det;
+        const apex = [bIn[0] + t * ux, bIn[1] + t * uy];
+        const reach = Math.hypot(apex[0] - pts[ci][0], apex[1] - pts[ci][1]);
+        if (reach > tol * 6.3) continue; // implausible: keep the measured shape
+        // the apex is a CENTERLINE point: the source ink must cover it. An
+        // apex probing off the ink means the geometry was misread —
+        // rebuilding there would draw an overshoot wedge.
+        const mid = [(apex[0] + pts[ci][0]) / 2, (apex[1] + pts[ci][1]) / 2];
+        if (!inkOk(apex) || !inkOk(mid)) continue;
+        // straighten the rounded zone onto the two legs (u points along the
+        // incoming leg toward the corner, v along the path INTO the corner
+        // from the outgoing side — walking away from the apex is -u / -v)
+        const dIn = Math.hypot(apex[0] - bIn[0], apex[1] - bIn[1]);
+        const dOut = Math.hypot(apex[0] - bOut[0], apex[1] - bOut[1]);
+        for (let k = 1; k < Math.max(zL, zR); k++) {
+          if (k < zL) {
+            const f = k / zL;
+            pts[idx(ci - k)] = [apex[0] - ux * f * dIn, apex[1] - uy * f * dIn];
+          }
+          if (k < zR) {
+            const f = k / zR;
+            pts[idx(ci + k)] = [apex[0] - vx * f * dOut, apex[1] - vy * f * dOut];
+          }
+        }
+        pts[ci] = apex;
+      }
     }
     if (cornersOut) {
       // record corner geometry (position + in/out directions) so the
@@ -1442,12 +1563,12 @@ const LineTracer = (() => {
   }
 
   // path data; single points render as dots, smooth chains as fitted curves
-  function chainToPathData(chain, smooth, tol, cornersOut) {
+  function chainToPathData(chain, smooth, tol, cornersOut, inkCtx) {
     const p = chain.points, n = p.length;
     if (n === 0) return '';
     if (n === 1) return `M ${fmt(p[0][0])} ${fmt(p[0][1])} l 0.01 0`;
     if (smooth && n >= 3) {
-      const segs = fitChain(p, !!chain.closed, tol || 1.5, cornersOut, chain.forcedPts);
+      const segs = fitChain(p, !!chain.closed, tol || 1.5, cornersOut, chain.forcedPts, inkCtx);
       if (segs.length) {
         const start = segs[0].line ? segs[0].line[0] : segs[0][0];
         let d = `M ${fmt(start[0])} ${fmt(start[1])}`;
@@ -1497,9 +1618,83 @@ const LineTracer = (() => {
   // Group chains into weight classes. Tight tolerance (25% + 0.6px cushion
   // for quantization at small widths) so every line renders very close to
   // its measured thickness; capped at 6 classes.
+  // Re-center polyline points onto the ink midline: scan along each point's
+  // normal for the two ink edges and move the point to their midpoint.
+  // Corrections are skipped where the ink is wider than the stroke (junction
+  // pools, joints) and clamped so a bad probe can't fling a point away.
+  function recenterOnInk(pts, closed, width, ink, w, h) {
+    const n = pts.length;
+    if (n < 5) return;
+    const inkAt = (x, y) => {
+      const xi = Math.round(x - 0.5), yi = Math.round(y - 0.5);
+      return xi >= 0 && yi >= 0 && xi < w && yi < h && ink[yi * w + xi] === 1;
+    };
+    const half = width * 0.75, maxShift = Math.max(1, width * 0.3);
+    const out = pts.map(p => p);
+    const kw = Math.max(2, Math.round(width / 3));
+    for (let i = 0; i < n; i++) {
+      if (!closed && (i === 0 || i === n - 1)) continue; // ends stay put
+      // corners have no meaningful normal — probing across the joint's
+      // pooled ink would drag the apex zone sideways and soften the corner
+      {
+        const a2 = pts[closed ? (i - kw + n) % n : Math.max(0, i - kw)];
+        const c2 = pts[closed ? (i + kw) % n : Math.min(n - 1, i + kw)];
+        const p2 = pts[i];
+        let da = Math.atan2(c2[1] - p2[1], c2[0] - p2[0]) -
+                 Math.atan2(p2[1] - a2[1], p2[0] - a2[0]);
+        while (da > Math.PI) da -= 2 * Math.PI;
+        while (da < -Math.PI) da += 2 * Math.PI;
+        if (Math.abs(da) > 0.7) continue;
+      }
+      const a = pts[closed ? (i - 2 + n) % n : Math.max(0, i - 2)];
+      const b = pts[closed ? (i + 2) % n : Math.min(n - 1, i + 2)];
+      let nx = -(b[1] - a[1]), ny = b[0] - a[0];
+      const nl = Math.hypot(nx, ny);
+      if (nl < 1e-6) continue;
+      nx /= nl; ny /= nl;
+      const p = pts[i];
+      if (!inkAt(p[0], p[1])) continue;
+      let tPos = 0, tNeg = 0;
+      while (tPos < half && inkAt(p[0] + nx * (tPos + 0.5), p[1] + ny * (tPos + 0.5))) tPos += 0.5;
+      while (tNeg > -half && inkAt(p[0] + nx * (tNeg - 0.5), p[1] + ny * (tNeg - 0.5))) tNeg -= 0.5;
+      if (tPos >= half || tNeg <= -half) continue; // pooled ink: no clean edges
+      let shift = (tPos + tNeg) / 2;
+      if (shift > maxShift) shift = maxShift;
+      else if (shift < -maxShift) shift = -maxShift;
+      out[i] = [p[0] + nx * shift, p[1] + ny * shift];
+    }
+    for (let i = 0; i < n; i++) pts[i] = out[i];
+  }
+
   function bucketChains(kept) {
+    // weight classes are seeded only by chains long enough to measure
+    // reliably — a stroke shorter than ~4x its width has no clean interior
+    // span (lens-shaped marks, tips), so it INHERITS the nearest class
+    // instead of spawning its own from a noisy median. Shortness is judged
+    // against the GLOBAL width scale too: an under-measured short stub must
+    // not bootstrap itself into "long" via its own too-small width.
+    let wmed = 0;
+    {
+      const arr = kept.filter(c => c.width != null)
+        .map(c => [c.width, c.geomLength || 1]).sort((a, b) => a[0] - b[0]);
+      const tot = arr.reduce((s, x) => s + x[1], 0);
+      let acc = 0;
+      for (const [wv, l] of arr) { acc += l; if (acc >= tot / 2) { wmed = wv; break; } }
+    }
+    // ...but only for JUNCTION-ATTACHED chains: pool ink corrupts exactly
+    // those measurements. Free-standing thin marks (stitch dashes next to a
+    // fat outline) measure cleanly and are a real thin class of their own.
+    const isLong = c => {
+      const cw = c.width || 1;
+      const attached = c.endDeg && (c.endDeg[0] > 2 || c.endDeg[1] > 2);
+      const ref = attached && cw >= wmed * 0.35 ? Math.max(cw, wmed * 0.8) : cw;
+      return (c.geomLength != null ? c.geomLength : c.points.length) >= 4 * ref;
+    };
+    let seeds = kept.filter(isLong);
+    if (!seeds.length) seeds = kept.slice();
+    const seedSet = new Set(seeds);
     const buckets = [];
-    for (const c of kept.slice().sort((a, b) => a.width - b.width)) {
+    for (const c of seeds.slice().sort((a, b) => a.width - b.width)) {
       const b = buckets[buckets.length - 1];
       if (b && c.width <= b.minW * 1.25 + 0.6) { b.chains.push(c); b.maxW = c.width; }
       else buckets.push({ chains: [c], minW: c.width, maxW: c.width });
@@ -1514,10 +1709,30 @@ const LineTracer = (() => {
       buckets[bi].maxW = buckets[bi + 1].maxW;
       buckets.splice(bi + 1, 1);
     }
-    for (const b of buckets) {
+    const weigh = b => {
       let ws = 0, ls = 0;
       for (const c of b.chains) { ws += c.width * c.geomLength; ls += c.geomLength; }
       b.width = ls ? ws / ls : b.minW;
+    };
+    buckets.forEach(weigh);
+    // a split must be genuinely multimodal: merge adjacent classes whose
+    // weighted widths sit within ~22% — anti-aliasing alone makes an
+    // axis-aligned stroke measure wider than a diagonal of the same weight
+    for (let i = 0; i + 1 < buckets.length; ) {
+      if (buckets[i + 1].width <= buckets[i].width * 1.22 + 0.6) {
+        buckets[i].chains.push(...buckets[i + 1].chains);
+        buckets[i].maxW = buckets[i + 1].maxW;
+        buckets.splice(i + 1, 1);
+        weigh(buckets[i]);
+        if (i) i--;
+      } else i++;
+    }
+    for (const c of kept) {
+      if (seedSet.has(c)) continue;
+      let bb = buckets[0];
+      for (const b of buckets)
+        if (Math.abs(c.width - b.width) < Math.abs(c.width - bb.width)) bb = b;
+      bb.chains.push(c); // class width stays seeded by the long chains
     }
     return buckets;
   }
@@ -1619,10 +1834,17 @@ const LineTracer = (() => {
           // same-width junction means it's a fragment of the line itself.
           // Caps scale with the junction size: fat strokes grow fat nubs.
           const jw = c.endWidths ? c.endWidths[a0 ? 0 : 1] : c.width;
+          // a short stub's own median width is untrustworthy (no clean
+          // interior span), but it still separates artifact from feature: a
+          // skeleton poke is a thin bump on the parent stroke's flank, while
+          // a real feature (a bell's brim tip, a serif) carries close to the
+          // drawing's stroke weight even when its tip tapers
+          const realStub = o.avgWidth > 0 &&
+            c.width >= o.avgWidth * 0.45 && len > jw;
           const lim = jw > c.width * 1.6
             ? Math.max(1.5 * c.width, 2.2 * jw)
             : 1.5 * c.width + 2;
-          if (len < Math.min(Math.max(32, jw * 2.4), lim)) continue;
+          if (!realStub && len < Math.min(Math.max(32, jw * 2.4), lim)) continue;
         } else if (a0 && a1) {
           const ew = c.endWidths || [c.width, c.width];
           // shorter than its two junction blobs combined = lives entirely
@@ -1636,16 +1858,26 @@ const LineTracer = (() => {
         }
       }
       // width-adaptive tolerance: wiggles that are detail on a 2px line are
-      // centerline noise on a 14px stroke
-      const eps = o.simplify > 0
-        ? Math.max(o.simplify, Math.min(40, (c.width || 1) * 0.35)) * dMul
+      // centerline noise on a 14px stroke. Strokes shorter than ~4x their
+      // width have no room for width-scaled smoothing or tolerance — both
+      // would deform them (a slim arc becomes a bulging comma), so they are
+      // fitted conservatively at length-scaled settings instead.
+      const isShort = !c.closed && c.width != null && len < 4 * c.width;
+      let eps = o.simplify > 0
+        ? Math.max(o.simplify, Math.min(26, (c.width || 1) * 0.2)) * dMul
         : o.simplify;
+      if (isShort && eps > 0) eps = Math.max(0.75, Math.min(eps, len / 8));
       let s;
       if (o.smooth) {
         // smooth the polyline (width-scaled) before fitting, then fit.
         // Reconstructed corner apexes are pinned back to their exact spot —
         // smoothing must not round away corners we deliberately rebuilt.
-        const pts = smoothChain(c.points, !!c.closed, (c.width || 2) * 0.4);
+        const smoothR = Math.min((c.width || 2) * 0.4, isShort ? len / 6 : 1e9);
+        const pts = smoothChain(c.points, !!c.closed, smoothR);
+        // smoothing systematically pulls curves INWARD (shrinkage grows with
+        // the width-scaled radius, so thick strokes drift visibly off the
+        // ink) — re-center every point on the ink midline along its normal
+        if (o.ink && c.width) recenterOnInk(pts, !!c.closed, c.width, o.ink, w, h);
         if (c.forced) {
           for (const f of c.forced) {
             let bi = 0, bd = Infinity;
@@ -1668,6 +1900,7 @@ const LineTracer = (() => {
       s.width = c.width;
       s.geomLength = len;
       s.caps = c.caps;
+      s.endDeg = c.endDeg; // weight classing needs to know junction-attachment
       kept.push(s);
     }
     // a split disc can produce several coincident dots — keep one
@@ -1692,7 +1925,8 @@ const LineTracer = (() => {
       const dots = [], lines = [];
       for (const c of chainList) (c.points.length === 1 ? dots : lines).push(c);
       const corners = [];
-      const d = lines.map(c => chainToPathData(c, o.smooth, c.fitTol, corners)).join(' ');
+      const inkCtx = o.ink ? { ink: o.ink, w, h } : null;
+      const d = lines.map(c => chainToPathData(c, o.smooth, c.fitTol, corners, inkCtx)).join(' ');
       let rc = 0, bc = 0;
       for (const c of chainList) if (c.caps)
         for (const cap of c.caps) {
@@ -1716,18 +1950,27 @@ const LineTracer = (() => {
         const rot = (d, a) => [d[0] * Math.cos(a) - d[1] * Math.sin(a),
                                d[0] * Math.sin(a) + d[1] * Math.cos(a)];
         for (const cr of corners) {
-          // a miter tip juts out along the outer bisector; a round join is
-          // equidistant in all outward directions. Compare run lengths —
-          // the ratio cancels any inward pull of the corner anchor. Closed
-          // rings traverse in arbitrary winding order, so try both signs
-          // and keep the outward one (the longer run).
-          let bis = V.norm(V.sub(cr.u, cr.v));
-          const rPlus = runFrom(cr.p, bis);
-          const rMinus = runFrom(cr.p, V.scale(bis, -1));
-          if (rMinus > rPlus) bis = V.scale(bis, -1);
-          const rBis = Math.max(rPlus, rMinus);
-          const rSide = (runFrom(cr.p, rot(bis, 0.6)) + runFrom(cr.p, rot(bis, -0.6))) / 2;
-          if (rBis > rSide * 1.2 + 0.5) mj++;
+          // a miter tip juts out along the outer bisector to (w/2)/cos(t/2)
+          // for a turn of t, while a round join stops at w/2 in every
+          // outward direction — measure the bisector run and compare it to
+          // both expectations. (Side-run ratios fail on exact corners: probes
+          // slightly off the bisector graze along the legs' own ink. And the
+          // INNER bisector always reaches the joint's square inner corner,
+          // sharp pen or round — never take the longer of the two runs.)
+          // u - v points to the convex side for either winding direction.
+          // Start the probe a little INSIDE the joint: the corner anchor can
+          // sit a fraction of a pixel off the ink and clip the run.
+          const bis = V.norm(V.sub(cr.u, cr.v));
+          const back = Math.max(1.5, wHalf * 0.5);
+          const rBis = runFrom([cr.p[0] - bis[0] * back, cr.p[1] - bis[1] * back], bis) - back;
+          const cosHalf = Math.sqrt(Math.max(0.05, (1 + V.dot(cr.u, cr.v)) / 2));
+          const tip = wHalf / cosHalf;
+          // a run far below the round-join radius means the probe started at
+          // a junction pool or off the ink — abstain instead of voting round
+          if (rBis < wHalf * 0.6) continue;
+          // pixel quantization clips diagonal runs by ~0.7px, so the gate
+          // sits well below the geometric midpoint between round and miter
+          if (rBis > wHalf + (tip - wHalf) * 0.3) mj++;
           else rj++;
         }
       }
@@ -1744,7 +1987,11 @@ const LineTracer = (() => {
     let paths;
     if (o.matchWeights && o.avgWidth > 0 && strokesOnly.length && strokesOnly.every(c => c.width != null)) {
       paths = bucketChains(strokesOnly).sort((a, b) => b.width - a.width)
-        .map(b => mkPath(b.chains, b.width / o.avgWidth * o.strokeWidth, b.width));
+        // x1.03: the 3-4 chamfer distance transform under-measures stroke
+        // width by ~3% averaged over edge orientations — corrected here,
+        // where MEASURED widths become rendered ones (explicit strokeWidth
+        // requests stay untouched)
+        .map(b => mkPath(b.chains, b.width / o.avgWidth * o.strokeWidth * 1.03, b.width));
     } else {
       paths = strokesOnly.length ? [mkPath(strokesOnly, o.strokeWidth, o.avgWidth || 2)] : [];
     }
@@ -1788,7 +2035,7 @@ const LineTracer = (() => {
     let mode = !o.mode || o.mode === 'auto' ? auto.mode : o.mode;
     if (o.invert && mode !== 'alpha') mode = mode === 'dark' ? 'light' : 'dark';
     const warnings = [];
-    let threshold, bin, skel, preprocess = 'none', sharpenApplied = 0;
+    let threshold, bin, skel, preprocess = 'none', sharpenApplied = 0, tuning = null;
     if (o.threshold != null) {
       threshold = o.threshold;
       bin = fillHoles(binarize(img, threshold, mode), img.width, img.height);
@@ -1843,7 +2090,7 @@ const LineTracer = (() => {
         return { topo: st.score, inkN };
       };
       progress(0.1, 'tuning threshold');
-      const blurInfo = measureBlur(proxy);
+      const blurInfo = measureBlur(proxy, o.srcScale);
       const shAmt = o.sharpen === 0 ? 0
         : (typeof o.sharpen === 'number' ? o.sharpen
         : (blurInfo.grade !== 'sharp' ? 1.6 : 0));
@@ -1895,18 +2142,28 @@ const LineTracer = (() => {
       for (const c of finalists) if (c.inkN > totalPx * 0.002) minInk = Math.min(minInk, c.inkN);
       if (!isFinite(minInk)) minInk = 0;
       for (const c of finalists) c.score = c.topo - Math.max(0, c.inkN - minInk) * 0.05;
-      // fidelity bias: preprocessing must win decisively on SHARP images
-      // (protecting crisp fine detail) — on measured-blurry images the
-      // remediation is expected to win, so the bar drops
-      const gate = s => blurInfo.grade === 'sharp' ? s * 1.1 + 50 : s * 0.85;
+      // fidelity bias: preprocessing must win DECISIVELY on SHARP images
+      // (protecting crisp fine detail and clean icon renders) — on
+      // measured-blurry images the remediation is expected to win, so the
+      // bar drops
+      const gate = s => blurInfo.grade === 'sharp' ? s * 1.3 + 120 : s * 0.85;
       const best = bestOther && (!bestNone || bestOther.score > gate(bestNone.score))
         ? bestOther : bestNone;
       trace.lastTuning = { cands, best };
+      tuning = {
+        grade: blurInfo.grade, p95: blurInfo.p95,
+        noneScore: bestNone ? Math.round(bestNone.score) : null,
+        altKey: bestOther ? bestOther.key : null,
+        altScore: bestOther ? Math.round(bestOther.score) : null
+      };
       preprocess = best.key;
       if (best.key === 'sharp') sharpenApplied = shAmt;
       if (blurInfo.grade === 'severe')
         warnings.push('Image is very blurry — result may need cleanup; a sharper source is recommended.');
-      if (best.score <= 0)
+      // a photo tell: the RAW image has no line structure at any threshold
+      // (negative topology score) and only preprocessing "found" some —
+      // sharpening a photo manufactures traceable texture edges
+      if (best.score <= 0 || (bestNone && bestNone.score <= 0 && best !== bestNone))
         warnings.push('No clear line structure found — this may be a photo or continuous-tone image; the trace may not be meaningful.');
       const off = o.thresholdOffset || 0;
       if (best.key === 'adaptive') {
@@ -1930,22 +2187,48 @@ const LineTracer = (() => {
 
     const dist = distanceTransform(bin, img.width, img.height);
     for (const c of chains) {
-      const samples = [];
-      let glen = 0;
+      const raw = [], cum = [0];
+      let glen = 0, maxS = 0;
       for (let k = 0; k < c.points.length; k++) {
         const p = c.points[k];
-        samples.push(dist[(p[1] - 0.5) * img.width + (p[0] - 0.5)]);
-        if (k) glen += Math.hypot(p[0] - c.points[k - 1][0], p[1] - c.points[k - 1][1]);
+        const s = dist[(p[1] - 0.5) * img.width + (p[0] - 0.5)];
+        raw.push(s);
+        if (s > maxS) maxS = s;
+        if (k) {
+          glen += Math.hypot(p[0] - c.points[k - 1][0], p[1] - c.points[k - 1][1]);
+          cum.push(glen);
+        }
       }
-      const first = samples[0], last = samples[samples.length - 1];
-      c._pw = samples.map(s => Math.max(1, 2 * s / 3 - 1)); // per-point widths
-      samples.sort((a, b) => a - b);
-      const radius = samples[samples.length >> 1] / 3;
-      c.width = Math.max(1, 2 * radius - 1);
+      const med = a => { const s = a.slice().sort((x, y) => x - y); return s[s.length >> 1]; };
+      const first = raw[0], last = raw[raw.length - 1];
+      // internal widths keep the raw chamfer scale (every geometry gate is
+      // tuned against it); the ~3% chamfer under-measurement is compensated
+      // at RENDER time (W_CAL in buildSvg)
+      const DSC = 3;
+      c._pw = raw.map(s => Math.max(1, 2 * s / DSC - 1)); // per-point widths
+      // the line's own width comes from clean INTERIOR spans only: ink pools
+      // at junctions, corners and caps and inflates the distance transform,
+      // while tapering tips deflate it — both bias a whole-chain median
+      const allMed = med(raw);
+      let base = raw;
+      if (!c.closed) {
+        const marginPx = 1.5 * Math.max(1, 2 * allMed / DSC - 1); // ~1.5x width
+        const interior = [];
+        for (let k = 0; k < raw.length; k++)
+          if (cum[k] >= marginPx && glen - cum[k] >= marginPx) interior.push(raw[k]);
+        if (interior.length >= 5) base = interior;
+      }
+      let mRad = med(base);
+      { // clip pooled outliers (interior corners/crossovers), re-take median
+        const pool = [];
+        for (const s of base) if (s <= mRad * 1.25) pool.push(s);
+        if (pool.length >= 5 && pool.length >= base.length * 0.6) mRad = med(pool);
+      }
+      c.width = Math.max(1, 2 * mRad / DSC - 1);
       // max width: a filled dot's chain is as "wide" as it is long at its
       // center, unlike a line — used to recognize disc remnants
-      c.maxWidth = Math.max(1, 2 * samples[samples.length - 1] / 3 - 1);
-      c.endWidths = [Math.max(1, 2 * first / 3 - 1), Math.max(1, 2 * last / 3 - 1)];
+      c.maxWidth = Math.max(1, 2 * maxS / DSC - 1);
+      c.endWidths = [Math.max(1, 2 * first / DSC - 1), Math.max(1, 2 * last / DSC - 1)];
       c.geomLength = glen;
     }
 
@@ -2188,6 +2471,13 @@ const LineTracer = (() => {
     for (const c of chains) {
       if (c.closed || c.points.length < 3 || !c.endDeg) continue;
       c.caps = [null, null];
+      // strokes shorter than ~4x their width: end tangents are too noisy to
+      // probe reliably, and a wrong flat-face extension visibly deforms the
+      // whole mark — keep the provable minimum (round caps)
+      if ((c.geomLength || c.points.length) < 4 * (c.width || 1)) {
+        for (const e of [0, 1]) if (c.endDeg[e] <= 1) c.caps[e] = 'round';
+        continue;
+      }
       for (const e of [0, 1]) {
         if (c.endDeg[e] > 1) continue; // attached ends have no cap
         {
@@ -2220,7 +2510,12 @@ const LineTracer = (() => {
         const d = L * 0.75, off = wHalf * 0.8;
         const flat = inkAt(pEnd[0] + tx * d - ty * off, pEnd[1] + ty * d + tx * off) &&
                      inkAt(pEnd[0] + tx * d + ty * off, pEnd[1] + ty * d - tx * off);
-        if (flat) {
+        // the "face" must belong to THIS stroke: ink clearly wider than the
+        // stroke out there means the probe entered a neighboring stroke or
+        // joint — extending would leave an overshoot nub with its own cap
+        const wide = inkAt(pEnd[0] + tx * d - ty * wHalf * 1.7, pEnd[1] + ty * d + tx * wHalf * 1.7) ||
+                     inkAt(pEnd[0] + tx * d + ty * wHalf * 1.7, pEnd[1] + ty * d - tx * wHalf * 1.7);
+        if (flat && !wide) {
           const q = [pEnd[0] + tx * Math.max(0, L - 1), pEnd[1] + ty * Math.max(0, L - 1)];
           if (e === 0) c.points.unshift(q);
           else c.points.push(q);
@@ -2267,7 +2562,7 @@ const LineTracer = (() => {
       }
     }
 
-    return { chains, width: img.width, height: img.height, mode, threshold, preprocess, sharpenApplied, warnings, avgStrokeWidth, inkColor, ink: bin };
+    return { chains, width: img.width, height: img.height, mode, threshold, preprocess, sharpenApplied, tuning, warnings, avgStrokeWidth, inkColor, ink: bin };
   }
 
   return {
@@ -2398,7 +2693,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = LineTracer
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(img, 0, 0, w, h);
-    return ctx.getImageData(0, 0, w, h);
+    const id = ctx.getImageData(0, 0, w, h);
+    id.srcScale = scale; // blur is graded at source resolution
+    return id;
   }
 
   function currentOpts() {
@@ -2456,6 +2753,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = LineTracer
     t0 = performance.now();
     const imgData = getImageData();
     const opts = currentOpts();
+    opts.srcScale = imgData.srcScale || 1;
     const w = getWorker();
     if (w) {
       w.postMessage(
@@ -2513,6 +2811,18 @@ if (typeof module !== 'undefined' && module.exports) module.exports = LineTracer
         ? 'auto ' + Math.round(traced.sharpenApplied * 100) + '%' : 'auto';
     }
     if (state.binUrl) { URL.revokeObjectURL(state.binUrl); state.binUrl = null; }
+    // surface the automatic decisions so a misfire is visible, not silent
+    const tun = traced.tuning;
+    if (tun) {
+      const prep = { none: 'no preprocessing', blur: 'denoised', sharp: 'sharpened',
+                     adaptive: 'lighting corrected' }[traced.preprocess] || traced.preprocess;
+      let s = `auto: ${tun.grade} source · threshold ${traced.threshold} · ${prep}`;
+      if (traced.preprocess !== 'none' && tun.altScore != null && tun.noneScore != null)
+        s += ` — structure score ${tun.altScore} vs ${tun.noneScore} unprocessed`;
+      $('autoInfo').textContent = s;
+    } else {
+      $('autoInfo').textContent = '';
+    }
     render(performance.now() - t0);
   }
 

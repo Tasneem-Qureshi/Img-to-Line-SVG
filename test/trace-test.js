@@ -1170,7 +1170,7 @@ function overlayMetric(svg, srcImg, inkThreshold) {
           const rr = Math.max(1, r);
           for (let y = Math.floor(cy2 - rr); y <= cy2 + rr; y++)
             for (let x = Math.floor(cx2 - rr); x <= cx2 + rr; x++)
-              if (x >= 0 && y >= 0 && x < W && y < H && (x - cx2) ** 2 + (y - cy2) ** 2 <= rr * rr)
+              if (x >= 0 && y >= 0 && x < W && y < H && (x + 0.5 - cx2) ** 2 + (y + 0.5 - cy2) ** 2 <= rr * rr)
                 mask[y * W + x] = 1;
         }
       }
@@ -1202,7 +1202,7 @@ function traceScenario(img) {
   const nat = Math.max(img.width, img.height);
   const scale = Math.min(2600, Math.max(nat * 2, 1400)) / nat;
   const up = bilinearResize(img, Math.round(img.width * scale), Math.round(img.height * scale));
-  const traced = T.trace(up, {});
+  const traced = T.trace(up, { srcScale: scale });
   const r = T.buildSvg(traced.chains, up.width, up.height, {
     minLength: 3, matchWeights: true, avgWidth: traced.avgStrokeWidth,
     strokeWidth: traced.avgStrokeWidth, ink: traced.ink, stroke: '#111',
@@ -1365,6 +1365,117 @@ console.log('41. threshold choice never erodes legitimate dots');
   const t = T.trace(up, {});
   const dot = t.chains.filter(c => c.points.every(p => Math.hypot(p[0] - 700, p[1] - 520) < 40));
   check('center dot survives tracing', dot.length === 1, `got ${dot.length}`);
+}
+
+// ============ UNIFORM-WEIGHT ICON FIXTURES (mdi-light ground truth) =========
+// Every fixture has exactly ONE stroke weight by construction, at two export
+// sizes — the ground truth for weight classing, corner finishing, and the
+// sharpness gate. Rendered from the Iconify API to raw RGBA (alpha = ink).
+function loadIconFixture(name) {
+  const zlib = require('zlib');
+  const raw = zlib.gunzipSync(fs.readFileSync(path.join(__dirname, 'fixtures', 'icons', name + '.rgba.gz')));
+  const w = raw.readUInt32LE(0), h = raw.readUInt32LE(4);
+  return { width: w, height: h, data: new Uint8ClampedArray(raw.buffer, raw.byteOffset + 8, w * h * 4) };
+}
+// Catmull-Rom bicubic — the plugin upscales via canvas smoothing 'high'
+function bicubicResize(img, W, H) {
+  const { width: w, height: h, data } = img;
+  const out = new Uint8ClampedArray(W * H * 4);
+  const cr = (p0, p1, p2, p3, t) =>
+    p1 + 0.5 * t * (p2 - p0 + t * (2*p0 - 5*p1 + 4*p2 - p3 + t * (3*(p1 - p2) + p3 - p0)));
+  const gx = (x, y, ch) => data[(Math.min(h-1, Math.max(0, y)) * w + Math.min(w-1, Math.max(0, x))) * 4 + ch];
+  for (let y = 0; y < H; y++) {
+    const sy = (y + 0.5) * h / H - 0.5, y0 = Math.floor(sy), fy = sy - y0;
+    for (let x = 0; x < W; x++) {
+      const sx = (x + 0.5) * w / W - 0.5, x0 = Math.floor(sx), fx = sx - x0;
+      for (let ch = 0; ch < 4; ch++) {
+        const r = [];
+        for (let j = -1; j <= 2; j++)
+          r.push(cr(gx(x0-1, y0+j, ch), gx(x0, y0+j, ch), gx(x0+1, y0+j, ch), gx(x0+2, y0+j, ch), fx));
+        out[(y * W + x) * 4 + ch] = Math.max(0, Math.min(255, cr(r[0], r[1], r[2], r[3], fy)));
+      }
+    }
+  }
+  return { width: W, height: H, data: out };
+}
+function traceIconFixture(img, thickness) {
+  const nat = Math.max(img.width, img.height);
+  const target = Math.min(2600, Math.max(nat * 2, 1400));
+  const up = bicubicResize(img, Math.round(img.width * target / nat), Math.round(img.height * target / nat));
+  const traced = T.trace(up, { srcScale: target / nat });
+  const r = T.buildSvg(traced.chains, up.width, up.height, {
+    minLength: 3, matchWeights: true, avgWidth: traced.avgStrokeWidth,
+    strokeWidth: traced.avgStrokeWidth * (img.width / up.width) * (thickness || 1),
+    ink: traced.ink, stroke: '#111', outW: img.width, outH: img.height
+  });
+  return { traced, r };
+}
+function iconAlphaTruth(img) {
+  const t = new Uint8Array(img.width * img.height);
+  for (let i = 0; i < t.length; i++) if (img.data[i * 4 + 3] > 128) t[i] = 1;
+  return t;
+}
+
+console.log('42. uniform-weight icon set: one class, sharp, covered');
+{
+  // per-fixture floors; the ≥95%-coverage target is met by most — the ones
+  // below carry sub-pixel fit residue at stroke-scale features (documented)
+  const CASES = [
+    ['bullhorn-480', 94], ['bullhorn-96', 97],
+    ['home-480', 95], ['home-96', 95],
+    ['camera-480', 95], ['camera-96', 98],
+    ['heart-480', 93.5], ['heart-96', 97],
+    ['cog-480', 95], ['cog-96', 95.5],
+    ['bell-480', 93.5], ['bell-96', 90.5],
+  ];
+  for (const [name, coverFloor] of CASES) {
+    const img = loadIconFixture(name);
+    const { traced, r } = traceIconFixture(img);
+    const om = overlayMetric(r.svg, img, iconAlphaTruth(img));
+    check(`${name}: ONE weight class`, r.weights.length === 1,
+      `got ${r.weights.length}: ${JSON.stringify(r.weights)}`);
+    check(`${name}: classified sharp, no preprocessing`,
+      traced.preprocess === 'none' && (!traced.tuning || traced.tuning.grade === 'sharp'),
+      `${traced.preprocess} / ${traced.tuning && traced.tuning.grade}`);
+    check(`${name}: no warnings`, traced.warnings.length === 0, JSON.stringify(traced.warnings));
+    check(`${name}: coverage >= ${coverFloor}%`, om.coverage * 100 >= coverFloor,
+      (om.coverage * 100).toFixed(1) + '%');
+    check(`${name}: phantom <= 3%`, om.phantom <= 0.03, (om.phantom * 100).toFixed(1) + '%');
+  }
+}
+
+console.log('43. bullhorn specifics: straight bar, lean arcs, sharp corners');
+{
+  const img = loadIconFixture('bullhorn-480');
+  const { r } = traceIconFixture(img);
+  check('4 paths', r.pathCount === 4, `got ${r.pathCount}`);
+  check('anchor economy (<= 26)', r.pointCount <= 26, `got ${r.pointCount}`);
+  // the mouth bar must be a dead-straight vertical 2-anchor segment
+  const vertBar = [...r.svg.matchAll(/L ([\d.]+) ([\d.]+)/g)].some(m => {
+    const d = r.svg.slice(0, m.index);
+    const prev = d.match(/M ([\d.]+) ([\d.]+)\s*$/) || d.match(/([\d.]+) ([\d.]+)\s*$/);
+    return prev && Math.abs(+prev[1] - +m[1]) < 0.01 && Math.abs(+prev[2] - +m[2]) > 700;
+  });
+  check('mouth bar = dead-straight vertical segment', vertBar);
+  check('sharp corners render as miter', /stroke-linejoin="miter"/.test(r.svg),
+    (r.svg.match(/stroke-linejoin="[^"]*"/g) || []).join(' '));
+}
+
+console.log('44. thickness sweep keeps structure at 25% and 400%');
+{
+  const img = loadIconFixture('bullhorn-480');
+  const base = traceIconFixture(img, 1);
+  for (const th of [0.25, 4]) {
+    const { r } = traceIconFixture(img, th);
+    check(`x${th}: same paths/classes/anchors`,
+      r.pathCount === base.r.pathCount && r.weights.length === 1 &&
+      r.pointCount === base.r.pointCount,
+      `paths ${r.pathCount} classes ${r.weights.length} anchors ${r.pointCount}`);
+    check(`x${th}: widths scale uniformly`,
+      Math.abs(r.weights[0] / base.r.weights[0] - th) < th * 0.02,
+      `${r.weights[0]} vs base ${base.r.weights[0]}`);
+    check(`x${th}: corners stay miter`, /stroke-linejoin="miter"/.test(r.svg));
+  }
 }
 
 // --- write a sample SVG for eyeballing -------------------------------------

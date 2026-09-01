@@ -63,9 +63,18 @@ What the automatic pipeline does:
 - broken line fragments (blur, faint pencil) are healed by gap bridging
   scaled to each line's own width and requiring the two ends to continue
   in the same direction — dashed stitching is never welded,
-- measures every line's own thickness (distance transform along the
-  skeleton) and groups lines into up to 6 weight classes, each emitted as
-  its own path — thick outlines stay thick, fine stitching stays fine,
+- measures every line's own thickness (distance transform along clean
+  interior spans only — ink pooling at junctions, corners and caps is
+  excluded, pooled outliers clipped, the chamfer bias calibrated out) and
+  groups lines into up to 6 weight classes, each emitted as its own path —
+  thick outlines stay thick, fine stitching stays fine. Classes merge
+  within ~22% (anti-aliasing alone skews axis-aligned vs diagonal
+  measurements) and strokes too short to measure reliably inherit the
+  nearest class instead of spawning their own: a uniform-weight icon
+  always produces exactly one class,
+- strokes shorter than ~4x their width are protected: conservative
+  fitting, length-capped smoothing, no cap probing — a slim tapered arc
+  stays a slim smooth arc,
 - **merges lines back through junctions**: where lines cross or touch, the
   skeleton chops them apart; ends that continue straight through with
   matching widths are rejoined into continuous curves,
@@ -92,6 +101,12 @@ What the automatic pipeline does:
   keyline rectangles — sharp-cornered, or uniformly rounded when the
   source is genuinely rounded — and acute tips (chevrons, arrowheads)
   are rebuilt to a sharp apex,
+- corners INSIDE continuous strokes are reconstructed too: thinning
+  retracts from every convex corner (~w/2) and smoothing rounds it
+  further, so the true apex is rebuilt at the intersection of the legs'
+  tangents (measured outside the rounded zone, clamped clear of
+  neighboring corners, validated against the ink) and pinned sharp;
+  L-joints where exactly two strokes meet fuse into one sharp corner,
 - stroke finishing is measured from the ink: flat line ends become butt
   caps with the anchor moved to the true ink face (round ends stay round),
   and sharp corners emit miter joins while soft ones stay round —
@@ -120,7 +135,7 @@ test harness extracts and runs that exact block in Node:
 node test/trace-test.js
 ```
 
-131 checks over synthetic images (lines, circles, junctions, crossings,
+201 checks over synthetic images (lines, circles, junctions, crossings,
 dashed stitching, dots, wobbly strokes, transparent/inverted variants,
 pokes, knots, collapsed loops, weight fidelity, icon-rule snapping, filled
 shapes, scale invariance) plus a regression test on a real AI-generated
@@ -128,4 +143,9 @@ fashion flat (`test/fixtures/bodysuit.bmp.gz`) and a real-world scenario
 matrix with overlay acceptance metrics (ink coverage / phantom strokes):
 photographed sketch under uneven lighting, soft and severe blur, crosshatch
 separation, colored lines on colored background, photo detection, and
-gap-bridging semantics (heals breaks, never welds dashes).
+gap-bridging semantics (heals breaks, never welds dashes). A dozen real
+Material Design Icons renders (`test/fixtures/icons/`, two export sizes
+each, exactly one stroke weight by construction) assert the uniform-weight
+guarantees: one class, sharp classification, no warnings, coverage/phantom
+bounds, straight-bar and miter-corner geometry, and a 25%–400% thickness
+sweep.
