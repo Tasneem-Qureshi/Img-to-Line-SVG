@@ -1520,6 +1520,59 @@ console.log('45. round-trip vs open-licensed originals (Lucide, ISC)');
   }
 }
 
+console.log('46. face-calm (test/failures): thick strokes on small features');
+{
+  // bold smiley: hooked closed eyes, arbitrary-angle L-nose, smile, circle.
+  // Reported defects: anchor clusters at stroke ends/hooks, kinked straights,
+  // 2-3x anchor overspend on small features. Per-path acceptance below.
+  const H2 = require(path.join(__dirname, 'corpus-harness', 'harness.js'));
+  const SP2 = require(path.join(__dirname, 'corpus-harness', 'svgpath.js'));
+  const zlib2 = require('zlib');
+  const raw = zlib2.gunzipSync(fs.readFileSync(path.join(__dirname, 'failures', 'face-calm.rgba.gz')));
+  const w = raw.readUInt32LE(0), h = raw.readUInt32LE(4);
+  const img = { width: w, height: h, data: new Uint8ClampedArray(raw.buffer, raw.byteOffset + 8, w * h * 4) };
+  const res = H2.traceRender(img);
+  const tr = H2.parseTraced(res.svg, res.traceW);
+  check('face: one weight class', res.weights.length === 1, `got ${res.weights.length}`);
+  const wid = tr.width || 1.7;
+  const clusterLimit = Math.max(2 * 24 / res.traceW, wid / 2); // max(2px, width/2) in 24-space
+  const parts = { circle: null, eyes: [], smile: null, nose: null };
+  for (const s of tr.subs) {
+    const c = s.poly.reduce((a, p) => [a[0] + p[0], a[1] + p[1]], [0, 0]).map(v => v / s.poly.length);
+    const len = SP2.polyLength(s.poly);
+    if (s.closed && len > 40) parts.circle = s;
+    else if (c[1] < 11) parts.eyes.push(s);
+    else if (len > 14) parts.smile = s;
+    else parts.nose = s;
+  }
+  check('face: 5 paths (circle, 2 eyes, nose, smile)',
+    !!(parts.circle && parts.eyes.length === 2 && parts.smile && parts.nose),
+    `circle=${!!parts.circle} eyes=${parts.eyes.length} smile=${!!parts.smile} nose=${!!parts.nose}`);
+  if (parts.circle) check('face: circle = 4 anchors', parts.circle.anchors === 4, `got ${parts.circle.anchors}`);
+  parts.eyes.forEach((e, i) =>
+    check(`face: eye ${i} <= 5 anchors`, e.anchors <= 5, `got ${e.anchors}`));
+  if (parts.smile) check('face: smile <= 5 anchors', parts.smile.anchors <= 5, `got ${parts.smile.anchors}`);
+  if (parts.nose) {
+    check('face: nose <= 4 anchors (straight diagonal + one elbow)',
+      parts.nose.anchors <= 4, `got ${parts.nose.anchors}`);
+    check('face: nose is all straight segments', parts.nose.cmds.every(c2 => c2.c === 'L'),
+      parts.nose.cmds.map(c2 => c2.c).join(''));
+  }
+  // global cluster rule: no two consecutive anchors closer than max(2px, w/2)
+  let worstGap = 1e9, where = '';
+  for (const s of tr.subs) {
+    const ap = [s.cmds.length ? s.cmds[0].pts[0] : s.startPt];
+    for (const c2 of s.cmds) ap.push(c2.pts[c2.pts.length - 1]);
+    const lim = s.closed ? ap.length - 1 : ap.length; // closed seam wraps
+    for (let i = 1; i < lim; i++) {
+      const g = Math.hypot(ap[i][0] - ap[i-1][0], ap[i][1] - ap[i-1][1]);
+      if (g < worstGap) { worstGap = g; where = `${s.closed ? 'closed' : 'open'} path @${ap[i].map(v => v.toFixed(1))}`; }
+    }
+  }
+  check('face: no anchor cluster (min gap >= max(2px, w/2))', worstGap >= clusterLimit,
+    `min gap ${worstGap.toFixed(2)} < ${clusterLimit.toFixed(2)} at ${where}`);
+}
+
 // --- write a sample SVG for eyeballing -------------------------------------
 {
   const img = makeImage(300, 200, WHITE);

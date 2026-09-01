@@ -61,8 +61,9 @@ function traceRender(img) {
 }
 
 // --- traced svg -> normalized subpaths in 24-space ---------------------------
-function parseTraced(svg, traceW) {
-  const k = 24 / traceW;
+function parseTraced(svg, traceW, span, off) {
+  const k = (span || 24) / traceW;
+  const o0 = off || 0;
   const subs = [];
   let cap = null, join = null, width = null;
   for (const m of svg.matchAll(/<path ([^>]*)\/?>/g)) {
@@ -79,8 +80,8 @@ function parseTraced(svg, traceW) {
     for (const s of SP.parsePathData(dm[1])) {
       // normalize to 24-space
       for (const seg of s.cmds)
-        for (const p of seg.pts) if (p.length === 2) { p[0] *= k; p[1] *= k; }
-      s.startPt = [s.startPt[0] * k, s.startPt[1] * k];
+        for (const p of seg.pts) if (p.length === 2) { p[0] = p[0] * k + o0; p[1] = p[1] * k + o0; }
+      s.startPt = [s.startPt[0] * k + o0, s.startPt[1] * k + o0];
       s.poly = SP.flattenSubpath(s, 4);
       s.isFill = isFill;
       subs.push(s);
@@ -123,9 +124,13 @@ const isDotSub = s => SP.polyLength(s.poly) < 0.6;
 // --- evaluate one icon at one size --------------------------------------------
 function evaluate(orig, tr, opts) {
   const o = opts || {};
-  const CL_MEAN = o.clMean || 0.30, CL_MAX = o.clMax || 1.0;
-  const W_TOL = o.wTol || 0.2, ANCH = o.anchMult || 1.5;
-  const MERGE_SLACK = o.mergeSlack || 0, GAP_MARGIN = o.gapMargin != null ? o.gapMargin : 0.35;
+  // all thresholds are defined for the corpus's stroke width 2 and scale
+  // with the EXPECTED width (bold renders override stroke-width)
+  const EW = o.expectWidth || 2, ws = EW / 2;
+  const CL_MEAN = (o.clMean || 0.30) * ws, CL_MAX = (o.clMax || 1.0) * ws;
+  const W_TOL = (o.wTol || 0.2) * ws, ANCH = o.anchMult || 1.5;
+  const MERGE_SLACK = o.mergeSlack || 0, GAP_MARGIN = (o.gapMargin != null ? o.gapMargin : 0.35) * ws;
+  const FAR = 1.0 * ws;
   const origLines = orig.subpaths.filter(s => !isDotSub(s));
   const origDots = orig.subpaths.filter(isDotSub);
   const trLines = tr.subs.filter(s => !isDotSub(s) && !s.isFill);
@@ -157,7 +162,7 @@ function evaluate(orig, tr, opts) {
       for (let j = i + 1; j < ends.length; j++) {
         if ((i >> 1) === (j >> 1)) continue;
         const A = ends[i], B = ends[j];
-        if (Math.hypot(A.p[0] - B.p[0], A.p[1] - B.p[1]) > 0.7) continue;
+        if (Math.hypot(A.p[0] - B.p[0], A.p[1] - B.p[1]) > 0.35 * EW) continue;
         const la = Math.hypot(A.d[0], A.d[1]) || 1, lb = Math.hypot(B.d[0], B.d[1]) || 1;
         const cos = (A.d[0] * B.d[0] + A.d[1] * B.d[1]) / (la * lb);
         if (cos < -0.7) { contPairs++; endUsed.add(i); endUsed.add(j); } // continuation
@@ -192,18 +197,18 @@ function evaluate(orig, tr, opts) {
     for (const p of s.poly) {
       const d = nearTr(p);
       sum += d; n++; if (d > mx) mx = d;
-      if (d > 1.0) far++;
+      if (d > FAR) far++;
     }
     if (far > s.poly.length * 0.3) missing++;
   }
-  for (const s of origDots) if (nearTr(s.poly[0]) > 1.2) missing++;
+  for (const s of origDots) if (nearTr(s.poly[0]) > 1.2 * ws) missing++;
   let phantom = 0;
   for (const s of trLines.concat(trFills)) {
     let far = 0;
-    for (const p of s.poly) if (nearOr(p) > 1.0) far++;
+    for (const p of s.poly) if (nearOr(p) > FAR) far++;
     if (far > s.poly.length * 0.3) phantom++;
   }
-  for (const s of trDots) if (nearOr(s.poly[0]) > 1.2) phantom++;
+  for (const s of trDots) if (nearOr(s.poly[0]) > 1.2 * ws) phantom++;
   M.centerline = { mean: sum / (n || 1), max: mx,
     pass: sum / (n || 1) <= CL_MEAN && mx <= CL_MAX };
   // 1. path count
@@ -216,7 +221,7 @@ function evaluate(orig, tr, opts) {
   }
   // 3. width
   M.width = { traced: tr.width, classes: (tr.weightsLen != null ? tr.weightsLen : 1),
-    pass: tr.weightsLen === 1 && tr.width != null && Math.abs(tr.width - 2) <= W_TOL };
+    pass: tr.weightsLen === 1 && tr.width != null && Math.abs(tr.width - EW) <= W_TOL };
   // 4/5. anchors + grammar over matched pairs
   const origAnchors = orig.subpaths.reduce((a, s) => a + (isDotSub(s) ? 1 : s.anchors), 0);
   const trAnchors = tr.subs.reduce((a, s) => a + (isDotSub(s) ? 1 : s.anchors), 0);
@@ -250,9 +255,14 @@ function evaluate(orig, tr, opts) {
       // a traced subpath may legitimately span several original subpaths
       // (a crossing traced as one continuous stroke) — only flag when the
       // traced counterpart is dedicated to this straight
-      const lenRatio = SP.polyLength(best.poly) / Math.max(0.01, SP.polyLength(s.poly));
-      if (lenRatio < 1.3 && !pureLine) straightOk = false;
-      if (lenRatio < 1.3 && pureLine) {
+      // "dedicated" counterpart: its endpoints sit at the original's ends
+      // (a chain legitimately spanning several originals is never judged)
+      const oa = s.poly[0], ob = s.poly[s.poly.length - 1];
+      const ta = best.poly[0], tb = best.poly[best.poly.length - 1];
+      const near2 = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 1.2;
+      const dedicated = (near2(ta, oa) && near2(tb, ob)) || (near2(ta, ob) && near2(tb, oa));
+      if (dedicated && !pureLine) straightOk = false;
+      if (dedicated && pureLine) {
         const a = best.poly[0], b = best.poly[best.poly.length - 1];
         const oa = s.poly[0], ob = s.poly[s.poly.length - 1];
         const angT = Math.atan2(b[1] - a[1], b[0] - a[0]) * 180 / Math.PI;
@@ -283,9 +293,9 @@ function evaluate(orig, tr, opts) {
           if (d < bestD) { bestD = d; bestP = p; }
         }
       }
-      if (bestP && bestD >= 2.4 && bestD <= 6) {
+      if (bestP && bestD >= 1.2 * EW && bestD <= 3 * EW) {
         const mid = [(end[0] + bestP[0]) / 2, (end[1] + bestP[1]) / 2];
-        if (nearTr(mid) < Math.min(bestD / 2 - GAP_MARGIN, 1.1)) gapsOk = false;
+        if (nearTr(mid) < Math.min(bestD / 2 - GAP_MARGIN, 0.55 * EW)) gapsOk = false;
       }
     }
   }
@@ -298,12 +308,70 @@ function evaluate(orig, tr, opts) {
     M.topology = { origClosed: oc, tracedClosed: tc, origOpen: oo, tracedOpen: to, gapsOk,
       pass: consistent && gapsOk };
   }
+  // 8. fit quality: (a) no two adjacent anchors closer than half the stroke
+  // width unless a true corner sits there; (b) no tangent break where the
+  // original ink is smooth
+  {
+    let clusterOk = true, smoothOk = true;
+    const origTurnAt = q => {
+      // local turn of the ORIGINAL geometry near q (24-space)
+      let best = 1e9, sub = null, idx = 0;
+      for (const os of orig.subpaths) {
+        for (let i = 0; i < os.poly.length; i++) {
+          const d = (os.poly[i][0]-q[0])**2 + (os.poly[i][1]-q[1])**2;
+          if (d < best) { best = d; sub = os; idx = i; }
+        }
+      }
+      if (!sub || best > 1.44) return Math.PI; // off-ink or at a free end: don't judge
+      const n = sub.poly.length;
+      const w2 = Math.max(2, Math.round(n * 0.5 / SP.polyLength(sub.poly))); // ~0.5 unit
+      const a = sub.poly[Math.max(0, idx - w2)], b = sub.poly[idx],
+            c = sub.poly[Math.min(n - 1, idx + w2)];
+      let da = Math.atan2(c[1]-b[1], c[0]-b[0]) - Math.atan2(b[1]-a[1], b[0]-a[0]);
+      while (da > Math.PI) da -= 2 * Math.PI;
+      while (da < -Math.PI) da += 2 * Math.PI;
+      return Math.abs(da);
+    };
+    const wHalf = Math.max(0.15, (tr.width || 2) / 2);
+    for (const s of trLines) {
+      const joints = [];
+      for (let i = 0; i + 1 < s.cmds.length; i++) {
+        const a = s.cmds[i], b = s.cmds[i + 1];
+        const p = a.pts[a.pts.length - 1];
+        const d1 = a.c === 'L' ? [p[0]-a.pts[0][0], p[1]-a.pts[0][1]]
+          : [p[0]-a.pts[2][0], p[1]-a.pts[2][1]];
+        const d2 = b.c === 'L' ? [b.pts[1][0]-p[0], b.pts[1][1]-p[1]]
+          : [b.pts[1][0]-p[0], b.pts[1][1]-p[1]];
+        const l1 = Math.hypot(d1[0], d1[1]) || 1, l2 = Math.hypot(d2[0], d2[1]) || 1;
+        const cos = (d1[0]*d2[0] + d1[1]*d2[1]) / (l1 * l2);
+        joints.push({ p, corner: cos < 0.866 }); // >30 deg break
+      }
+      // clusters
+      const ap = [s.cmds.length ? s.cmds[0].pts[0] : s.startPt];
+      for (const c of s.cmds) ap.push(c.pts[c.pts.length - 1]);
+      const lim = s.closed ? ap.length - 1 : ap.length;
+      for (let i = 1; i < lim; i++) {
+        const g = Math.hypot(ap[i][0]-ap[i-1][0], ap[i][1]-ap[i-1][1]);
+        if (g < wHalf) {
+          const nearCorner = joints.some(j => j.corner &&
+            (Math.hypot(j.p[0]-ap[i][0], j.p[1]-ap[i][1]) < 0.01 ||
+             Math.hypot(j.p[0]-ap[i-1][0], j.p[1]-ap[i-1][1]) < 0.01));
+          if (!nearCorner) clusterOk = false;
+        }
+      }
+      // smoothness: traced corner where the original is smooth
+      for (const j of joints)
+        if (j.corner && origTurnAt(j.p) < 0.35) smoothOk = false;
+    }
+    M.fitQuality = { clusterOk, smoothOk, pass: clusterOk && smoothOk };
+  }
   // 7. finishing (this corpus: round/round everywhere)
   M.finishing = { cap: tr.cap, join: tr.join,
     pass: (tr.cap === 'round' || tr.cap == null) && (tr.join === 'round' || tr.join == null) };
 
   M.pass = M.pathCount.pass && M.centerline.pass && M.width.pass &&
-           M.anchors.pass && M.grammar.pass && M.topology.pass && M.finishing.pass;
+           M.anchors.pass && M.grammar.pass && M.topology.pass && M.finishing.pass &&
+           M.fitQuality.pass;
   return M;
 }
 
@@ -365,10 +433,12 @@ function main() {
   const all = flag('all');
   const N = +opt('n', 150);
   const degradeMode = opt('degrade', null);
+  const BOLD = flag('bold'); // stroke-width-5 renders of the same originals
   // thresholds are CHECKED IN (test/corpus-harness/thresholds.json): the
   // clean tier for pristine renders, the degraded tier for --degrade runs
   const TH = JSON.parse(fs.readFileSync(path.join(__dirname, 'thresholds.json'), 'utf8'));
-  const evalOpts = degradeMode ? TH.degraded : TH.clean;
+  const evalOpts = Object.assign({}, degradeMode ? TH.degraded : TH.clean,
+    BOLD ? { expectWidth: 5 } : {});
   const names = fs.readdirSync(CORPUS).filter(f => f.endsWith('.svg')).map(f => f.replace(/\.svg$/, '')).sort();
   const subset = all ? names : names.filter((_, i) => i % Math.ceil(names.length / N) === 0);
   fs.mkdirSync(REPORT, { recursive: true });
@@ -381,12 +451,13 @@ function main() {
     for (const size of sizes) {
       let tr, M;
       try {
-        const render = degradeMode === 'jpeg'
-          ? loadRender(name + '@' + size + 'jpeg')  // pre-rendered JPEG q60 roundtrip (240px only)
-          : degradeMode ? degrade(loadRender(name + '@' + size), degradeMode)
-          : loadRender(name + '@' + size);
+        const key = name + '@' + size + (BOLD ? 'bold' : degradeMode === 'jpeg' ? 'jpeg' : '');
+        const render = degradeMode && degradeMode !== 'jpeg'
+          ? degrade(loadRender(key), degradeMode)
+          : loadRender(key);
         const res = traceRender(render);
-        tr = parseTraced(res.svg, res.traceW);
+        // bold renders use a padded viewBox (-3 -3 30 30) so stroke-5 fits
+        tr = BOLD ? parseTraced(res.svg, res.traceW, 30, -3) : parseTraced(res.svg, res.traceW);
         tr.weightsLen = res.weights.length;
         tr.pointCount = res.pointCount;
         tr.svg = res.svg; tr.traceW = res.traceW;
@@ -401,7 +472,7 @@ function main() {
   }
 
   // scorecard
-  const metrics = ['pathCount', 'centerline', 'width', 'anchors', 'grammar', 'topology', 'finishing'];
+  const metrics = ['pathCount', 'centerline', 'width', 'anchors', 'grammar', 'topology', 'finishing', 'fitQuality'];
   const bySize = {};
   for (const size of sizes) {
     const rs = rows.filter(r => r.size === size);
@@ -411,7 +482,7 @@ function main() {
     bySize[size] = agg;
   }
   const scorecard = { when: new Date().toISOString(), subset: subset.length, sizes, degrade: degradeMode, bySize };
-  const tag = (degradeMode || 'clean') + (all ? '-full' : '');
+  const tag = (BOLD ? 'bold' : degradeMode || 'clean') + (all ? '-full' : '');
   fs.writeFileSync(path.join(REPORT, `scorecard-${tag}.json`),
     JSON.stringify({ scorecard, rows: rows.map(r => ({ name: r.name, size: r.size, M: r.M })) }, null, 1));
 

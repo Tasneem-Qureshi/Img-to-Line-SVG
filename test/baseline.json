@@ -2,76 +2,83 @@
  "tier": "quick",
  "clean": {
   "96": {
-   "allPass": 36.7,
+   "allPass": 31.3,
    "pathCount": 68.7,
    "centerline": 61.9,
    "width": 99.3,
    "anchors": 99.3,
-   "grammar": 84.4,
+   "grammar": 85,
    "topology": 53.1,
-   "finishing": 81.6
+   "finishing": 81.6,
+   "fitQuality": 55.8
   },
   "240": {
-   "allPass": 36.1,
+   "allPass": 29.3,
    "pathCount": 59.9,
    "centerline": 53.7,
    "width": 98.6,
    "anchors": 98.6,
-   "grammar": 83.7,
+   "grammar": 85.7,
    "topology": 47.6,
-   "finishing": 80.3
+   "finishing": 80.3,
+   "fitQuality": 55.8
   },
   "480": {
-   "allPass": 42.2,
+   "allPass": 29.3,
    "pathCount": 70.7,
    "centerline": 61.9,
    "width": 98.6,
    "anchors": 98.6,
-   "grammar": 84.4,
+   "grammar": 85,
    "topology": 54.4,
-   "finishing": 84.4
+   "finishing": 84.4,
+   "fitQuality": 54.4
   }
  },
  "degraded": {
   "down": {
-   "allPass": 37.3,
-   "pathCount": 79.7,
-   "centerline": 81.4,
+   "allPass": 28.6,
+   "pathCount": 73.5,
+   "centerline": 75.5,
    "width": 100,
    "anchors": 100,
-   "grammar": 86.4,
-   "topology": 67.8,
-   "finishing": 79.7
+   "grammar": 87.8,
+   "topology": 63.9,
+   "finishing": 81,
+   "fitQuality": 51.7
   },
   "blur": {
-   "allPass": 40.7,
-   "pathCount": 83.1,
-   "centerline": 88.1,
-   "width": 98.3,
-   "anchors": 98.3,
-   "grammar": 86.4,
-   "topology": 59.3,
-   "finishing": 78
+   "allPass": 32.7,
+   "pathCount": 75.5,
+   "centerline": 83.7,
+   "width": 99.3,
+   "anchors": 99.3,
+   "grammar": 85.7,
+   "topology": 60.5,
+   "finishing": 81,
+   "fitQuality": 53.7
   },
   "rot": {
-   "allPass": 49.2,
-   "pathCount": 81.4,
-   "centerline": 88.1,
-   "width": 98.3,
-   "anchors": 98.3,
-   "grammar": 83.1,
-   "topology": 66.1,
-   "finishing": 81.4
+   "allPass": 29.9,
+   "pathCount": 76.9,
+   "centerline": 83,
+   "width": 99.3,
+   "anchors": 99.3,
+   "grammar": 83,
+   "topology": 66,
+   "finishing": 80.3,
+   "fitQuality": 55.8
   },
   "jpeg": {
-   "allPass": 49.2,
-   "pathCount": 84.7,
-   "centerline": 91.5,
+   "allPass": 36.1,
+   "pathCount": 79.6,
+   "centerline": 84.4,
    "width": 100,
    "anchors": 100,
-   "grammar": 84.7,
-   "topology": 67.8,
-   "finishing": 83.1
+   "grammar": 86.4,
+   "topology": 67.3,
+   "finishing": 83,
+   "fitQuality": 59.2
   }
  },
  "fullClean": {
@@ -108,5 +115,30 @@
   "when": "2026-09-01T17:08:00+02:00",
   "icons": 1173,
   "note": "release tier: node test/run-all.js --full"
- }
+ },
+ "bold": {
+  "240": {
+   "allPass": 4.1,
+   "pathCount": 17.7,
+   "centerline": 36.7,
+   "width": 69.4,
+   "anchors": 92.5,
+   "grammar": 91.2,
+   "topology": 17,
+   "finishing": 70.7,
+   "fitQuality": 18.4
+  },
+  "480": {
+   "allPass": 3.4,
+   "pathCount": 19,
+   "centerline": 34.7,
+   "width": 70.1,
+   "anchors": 89.8,
+   "grammar": 91.2,
+   "topology": 15.6,
+   "finishing": 72.8,
+   "fitQuality": 18.4
+  }
+ },
+ "_note": "floor = v2.3.1 tracer measured by the v2.4 metrics (fitQuality, endpoint-dedicated straightness, width-scaled thresholds)"
 }
