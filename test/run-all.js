@@ -18,6 +18,7 @@ const ROOT = path.join(__dirname, '..');
 const BASE = path.join(__dirname, 'baseline.json');
 const args = process.argv.slice(2);
 const FULL = args.includes('--full');
+const N = process.env.RATCHET_N || '150'; // subset size (icons)
 const UPDATE = args.includes('--update-baseline');
 
 function run(cmd) {
@@ -33,23 +34,23 @@ function scorecard(tag) {
 run('node test/trace-test.js');
 
 // 2. corpus harness, clean
-run(`node test/corpus-harness/harness.js ${FULL ? '--all' : '--n 150'}`);
+run(`node test/corpus-harness/harness.js ${FULL ? '--all' : '--n ' + N}`);
 const clean = scorecard('clean');
 
 // 2b. bold-weight corpus (stroke-width 5 renders of the same originals)
-run(`node test/corpus-harness/harness.js --n 150 --sizes 240,480 --bold`);
+run(`node test/corpus-harness/harness.js --n ${N} --sizes 240,480 --bold`);
 const bold = scorecard('bold');
 
 // 3. degraded runs (stratified subset at 240px; jpeg uses pre-rendered q60 fixtures)
 const degraded = {};
 for (const mode of ['down', 'blur', 'rot', 'jpeg']) {
-  run(`node test/corpus-harness/harness.js --n 150 --sizes 240 --degrade ${mode}`);
+  run(`node test/corpus-harness/harness.js --n ${N} --sizes 240 --degrade ${mode}`);
   degraded[mode] = scorecard(mode);
 }
 
 // 4. collect current numbers
 const metrics = ['allPass', 'pathCount', 'centerline', 'width', 'anchors', 'grammar', 'topology', 'finishing', 'fitQuality'];
-const current = { tier: FULL ? 'full' : 'quick', clean: {}, bold: {}, degraded: {} };
+const current = { tier: FULL ? 'full' : 'quick', n: FULL ? 1173 : +N, clean: {}, bold: {}, degraded: {} };
 for (const size of Object.keys(clean.bySize)) {
   current.clean[size] = {};
   for (const m of metrics)
@@ -73,8 +74,8 @@ if (!fs.existsSync(BASE) || UPDATE) {
   process.exit(0);
 }
 const baseline = JSON.parse(fs.readFileSync(BASE, 'utf8'));
-if (baseline.tier !== current.tier) {
-  console.log(`\nNOTE: baseline tier is '${baseline.tier}', this run is '${current.tier}' — comparing anyway.`);
+if (baseline.tier !== current.tier || (baseline.n && baseline.n !== current.n)) {
+  console.log(`\nNOTE: baseline is tier '${baseline.tier}' n=${baseline.n || '?'} — this run is '${current.tier}' n=${current.n}. Cross-size comparisons carry ~1-icon noise per cell; use RATCHET_N=${baseline.n || 400} for a like-for-like verdict.`);
 }
 let drops = 0, gains = 0;
 const cmp = (label, base, cur) => {

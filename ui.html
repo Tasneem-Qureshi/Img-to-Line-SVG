@@ -669,7 +669,8 @@ const LineTracer = (() => {
             // trimmed ends pair by their remembered junction point
             const tr = c.trim && c.trim[e];
             const p = tr ? tr.p : (e === 0 ? c.points[0] : c.points[c.points.length - 1]);
-            ends.push({ ci, e, p, jr: tr ? tr.r : 2, dir: dirAt(c, e), width: c.width || 1 });
+            ends.push({ ci, e, p, jr: tr ? tr.r : 2, dir: dirAt(c, e), width: c.width || 1,
+              frag: (c.geomLength || c.points.length) < (c.width || 1) * 0.5 });
           }
         }
       });
@@ -695,7 +696,9 @@ const LineTracer = (() => {
         }
       }
       if (!pairs.length) break;
-      pairs.sort((a, b) => a.cos - b.cos); // straightest continuations first
+      pairs.sort((a, b) =>
+        (a.cos + (a.A.frag || a.B.frag ? 0.12 : 0)) -
+        (b.cos + (b.A.frag || b.B.frag ? 0.12 : 0))); // straightest first; knot fragments yield
 
       const usedChain = new Set(), usedEnd = new Set();
       const endKey = t => t.ci + ':' + t.e;
@@ -827,6 +830,59 @@ const LineTracer = (() => {
         }
         return false;
       };
+      // a corner-join must ADD coverage: when its legs run along ink that
+      // OTHER chains already trace (a tip bridged back toward a junction
+      // through its own stroke's ink), the "corner" doubles the path back
+      // over drawn geometry — the zigzag X failure mode
+      // grid-indexed once per round: cell -> chain ids with points there
+      const covGrid = new Map();
+      const COV_CELL = 16;
+      for (let ci = 0; ci < list.length; ci++) {
+        const pts2 = list[ci].points;
+        for (let m2 = 0; m2 < pts2.length; m2 += 4) {
+          const k2 = ((pts2[m2][0] / COV_CELL) | 0) * 4096 + ((pts2[m2][1] / COV_CELL) | 0);
+          let arr = covGrid.get(k2);
+          if (!arr) covGrid.set(k2, arr = new Set());
+          arr.add(ci);
+        }
+      }
+      const coveredByOthers = (A, B, apex) => {
+        let covered = 0, total = 0;
+        const R = Math.ceil((A.width + B.width) * 0.3 / COV_CELL);
+        for (const [p, q] of [[A.p, apex], [apex, B.p]]) {
+          const L = Math.hypot(q[0] - p[0], q[1] - p[1]);
+          const n = Math.max(2, Math.ceil(L / 6));
+          for (let k = 1; k < n; k++) {
+            const x = p[0] + (q[0] - p[0]) * k / n, y = p[1] + (q[1] - p[1]) * k / n;
+            total++;
+            const cx = (x / COV_CELL) | 0, cy = (y / COV_CELL) | 0;
+            let hit = false;
+            for (let dx = -R; dx <= R && !hit; dx++)
+              for (let dy = -R; dy <= R && !hit; dy++) {
+                const cell = covGrid.get((cx + dx) * 4096 + (cy + dy));
+                if (!cell) continue;
+                for (const ci of cell)
+                  if (ci !== A.ci && ci !== B.ci) { hit = true; break; }
+              }
+            // a leg may also double back over A's or B's OWN body — only the
+            // retraction zone right at the joining ends is legitimate ground
+            if (!hit) {
+              const lim2 = ((A.width + B.width) * 0.3) ** 2;
+              for (const E of [A, B]) {
+                const pts2 = list[E.ci].points;
+                const guard = Math.ceil((E.width || 2) * 1.5);
+                const lo = E.e === 0 ? guard : 0;
+                const hi = E.e === 0 ? pts2.length : pts2.length - guard;
+                for (let m2 = lo; m2 < hi && !hit; m2 += 5)
+                  if ((pts2[m2][0]-x)**2 + (pts2[m2][1]-y)**2 < lim2) hit = true;
+                if (hit) break;
+              }
+            }
+            if (hit) covered++;
+          }
+        }
+        return covered > total * 0.75;
+      };
       const cPairs = [];
       for (let i = 0; i < ends.length; i++) {
         for (let j = i + 1; j < ends.length; j++) {
@@ -935,6 +991,7 @@ const LineTracer = (() => {
           }
         }
         if (!jointInked(pr.A.p, apex, pr.B.p)) continue;
+        if (coveredByOthers(pr.A, pr.B, apex)) continue;
         addedC.push({
           closed: false,
           forced: (A.forced || []).concat(B.forced || [], [apex]),

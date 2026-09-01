@@ -2,83 +2,83 @@
  "tier": "quick",
  "clean": {
   "96": {
-   "allPass": 31.3,
-   "pathCount": 68.7,
-   "centerline": 61.9,
-   "width": 99.3,
-   "anchors": 99.3,
-   "grammar": 85,
-   "topology": 53.1,
-   "finishing": 81.6,
-   "fitQuality": 55.8
+   "allPass": 30.4,
+   "pathCount": 69.8,
+   "centerline": 64.7,
+   "width": 99.7,
+   "anchors": 99,
+   "grammar": 83.9,
+   "topology": 55.5,
+   "finishing": 84.1,
+   "fitQuality": 55
   },
   "240": {
-   "allPass": 29.3,
-   "pathCount": 59.9,
-   "centerline": 53.7,
-   "width": 98.6,
-   "anchors": 98.6,
-   "grammar": 85.7,
-   "topology": 47.6,
-   "finishing": 80.3,
-   "fitQuality": 55.8
+   "allPass": 27.4,
+   "pathCount": 65.2,
+   "centerline": 58.1,
+   "width": 99.5,
+   "anchors": 99.5,
+   "grammar": 84.7,
+   "topology": 55,
+   "finishing": 85.7,
+   "fitQuality": 54.2
   },
   "480": {
-   "allPass": 29.3,
-   "pathCount": 70.7,
-   "centerline": 61.9,
-   "width": 98.6,
-   "anchors": 98.6,
-   "grammar": 85,
-   "topology": 54.4,
-   "finishing": 84.4,
-   "fitQuality": 54.4
+   "allPass": 30.4,
+   "pathCount": 71.4,
+   "centerline": 64.7,
+   "width": 99.7,
+   "anchors": 99,
+   "grammar": 84.7,
+   "topology": 59.1,
+   "finishing": 89.5,
+   "fitQuality": 57
   }
  },
  "degraded": {
   "down": {
-   "allPass": 28.6,
-   "pathCount": 73.5,
-   "centerline": 75.5,
-   "width": 100,
+   "allPass": 28.1,
+   "pathCount": 77,
+   "centerline": 80.1,
+   "width": 99.7,
    "anchors": 100,
-   "grammar": 87.8,
-   "topology": 63.9,
-   "finishing": 81,
-   "fitQuality": 51.7
+   "grammar": 85.2,
+   "topology": 66.5,
+   "finishing": 87.7,
+   "fitQuality": 54.7
   },
   "blur": {
    "allPass": 32.7,
-   "pathCount": 75.5,
-   "centerline": 83.7,
-   "width": 99.3,
-   "anchors": 99.3,
-   "grammar": 85.7,
-   "topology": 60.5,
-   "finishing": 81,
-   "fitQuality": 53.7
+   "pathCount": 79,
+   "centerline": 88,
+   "width": 99.7,
+   "anchors": 100,
+   "grammar": 84.1,
+   "topology": 62.4,
+   "finishing": 86.2,
+   "fitQuality": 54.2
   },
   "rot": {
-   "allPass": 29.9,
-   "pathCount": 76.9,
-   "centerline": 83,
-   "width": 99.3,
-   "anchors": 99.3,
-   "grammar": 83,
-   "topology": 66,
-   "finishing": 80.3,
-   "fitQuality": 55.8
+   "allPass": 32.2,
+   "pathCount": 78.5,
+   "centerline": 84.9,
+   "width": 99.7,
+   "anchors": 100,
+   "grammar": 83.4,
+   "topology": 67.8,
+   "finishing": 89,
+   "fitQuality": 55.2
   },
   "jpeg": {
-   "allPass": 36.1,
-   "pathCount": 79.6,
-   "centerline": 84.4,
-   "width": 100,
+   "allPass": 34.3,
+   "pathCount": 80.1,
+   "centerline": 83.4,
+   "width": 99.7,
    "anchors": 100,
-   "grammar": 86.4,
+   "grammar": 84.1,
    "topology": 67.3,
-   "finishing": 83,
-   "fitQuality": 59.2
+   "finishing": 88.7,
+   "fitQuality": 58.8
   }
  },
  "fullClean": {
@@ -118,27 +118,28 @@
  },
  "bold": {
   "240": {
-   "allPass": 4.1,
-   "pathCount": 17.7,
-   "centerline": 36.7,
-   "width": 69.4,
-   "anchors": 92.5,
-   "grammar": 91.2,
-   "topology": 17,
-   "finishing": 70.7,
-   "fitQuality": 18.4
+   "allPass": 4.9,
+   "pathCount": 22.3,
+   "centerline": 34.8,
+   "width": 68.3,
+   "anchors": 91.8,
+   "grammar": 91,
+   "topology": 21,
+   "finishing": 72.9,
+   "fitQuality": 17.9
   },
   "480": {
-   "allPass": 3.4,
-   "pathCount": 19,
-   "centerline": 34.7,
-   "width": 70.1,
-   "anchors": 89.8,
-   "grammar": 91.2,
-   "topology": 15.6,
-   "finishing": 72.8,
-   "fitQuality": 18.4
+   "allPass": 5.6,
+   "pathCount": 23.5,
+   "centerline": 37.3,
+   "width": 68.8,
+   "anchors": 92.8,
+   "grammar": 90.3,
+   "topology": 22,
+   "finishing": 73.1,
+   "fitQuality": 20.5
   }
  },
- "_note": "floor = v2.3.1 tracer measured by the v2.4 metrics (fitQuality, endpoint-dedicated straightness, width-scaled thresholds)"
+ "_note": "floor = v2.3.1 tracer measured by the v2.4 metrics at n=400 (arbitration sweep 2026-09-02). Verdict vs fit-quality branch: 49 gains / 12 drops of 0.2-0.8% \u2014 a real thin regression tail, ratchet blocks the merge.",
+ "n": 400
 }
