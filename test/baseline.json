@@ -2,83 +2,83 @@
  "tier": "quick",
  "clean": {
   "96": {
-   "allPass": 30.4,
-   "pathCount": 69.8,
-   "centerline": 64.7,
+   "allPass": 33.2,
+   "pathCount": 70.3,
+   "centerline": 64.5,
    "width": 99.7,
-   "anchors": 99,
-   "grammar": 83.9,
+   "anchors": 99.2,
+   "grammar": 83.4,
    "topology": 55.5,
-   "finishing": 84.1,
-   "fitQuality": 55
+   "finishing": 88.5,
+   "fitQuality": 58.1
   },
   "240": {
-   "allPass": 27.4,
+   "allPass": 31.2,
    "pathCount": 65.2,
-   "centerline": 58.1,
+   "centerline": 58.8,
    "width": 99.5,
-   "anchors": 99.5,
+   "anchors": 99.2,
    "grammar": 84.7,
    "topology": 55,
-   "finishing": 85.7,
-   "fitQuality": 54.2
+   "finishing": 90.8,
+   "fitQuality": 59.1
   },
   "480": {
-   "allPass": 30.4,
+   "allPass": 34,
    "pathCount": 71.4,
-   "centerline": 64.7,
+   "centerline": 63.9,
    "width": 99.7,
-   "anchors": 99,
-   "grammar": 84.7,
+   "anchors": 99.2,
+   "grammar": 85.4,
    "topology": 59.1,
-   "finishing": 89.5,
-   "fitQuality": 57
+   "finishing": 91.8,
+   "fitQuality": 61.9
   }
  },
  "degraded": {
   "down": {
-   "allPass": 28.1,
-   "pathCount": 77,
-   "centerline": 80.1,
+   "allPass": 30.9,
+   "pathCount": 77.2,
+   "centerline": 82.4,
    "width": 99.7,
    "anchors": 100,
-   "grammar": 85.2,
-   "topology": 66.5,
-   "finishing": 87.7,
-   "fitQuality": 54.7
+   "grammar": 84.9,
+   "topology": 66.2,
+   "finishing": 90.5,
+   "fitQuality": 58.8
   },
   "blur": {
-   "allPass": 32.7,
-   "pathCount": 79,
-   "centerline": 88,
+   "allPass": 36.6,
+   "pathCount": 81.1,
+   "centerline": 89.8,
    "width": 99.7,
    "anchors": 100,
-   "grammar": 84.1,
-   "topology": 62.4,
-   "finishing": 86.2,
-   "fitQuality": 54.2
+   "grammar": 83.9,
+   "topology": 61.9,
+   "finishing": 88.7,
+   "fitQuality": 61.9
   },
   "rot": {
-   "allPass": 32.2,
-   "pathCount": 78.5,
-   "centerline": 84.9,
+   "allPass": 37.1,
+   "pathCount": 78,
+   "centerline": 85.9,
    "width": 99.7,
    "anchors": 100,
    "grammar": 83.4,
    "topology": 67.8,
-   "finishing": 89,
-   "fitQuality": 55.2
+   "finishing": 90.5,
+   "fitQuality": 61.6
   },
   "jpeg": {
-   "allPass": 34.3,
-   "pathCount": 80.1,
-   "centerline": 83.4,
+   "allPass": 38.6,
+   "pathCount": 80.6,
+   "centerline": 87,
    "width": 99.7,
    "anchors": 100,
    "grammar": 84.1,
-   "topology": 67.3,
-   "finishing": 88.7,
-   "fitQuality": 58.8
+   "topology": 66.5,
+   "finishing": 90.8,
+   "fitQuality": 64.7
   }
  },
  "fullClean": {
@@ -118,28 +118,28 @@
  },
  "bold": {
   "240": {
-   "allPass": 4.9,
-   "pathCount": 22.3,
-   "centerline": 34.8,
-   "width": 68.3,
-   "anchors": 91.8,
-   "grammar": 91,
-   "topology": 21,
-   "finishing": 72.9,
-   "fitQuality": 17.9
+   "allPass": 7.2,
+   "pathCount": 23,
+   "centerline": 35.3,
+   "width": 69.3,
+   "anchors": 96.9,
+   "grammar": 91.8,
+   "topology": 22.5,
+   "finishing": 82.4,
+   "fitQuality": 33.2
   },
   "480": {
-   "allPass": 5.6,
-   "pathCount": 23.5,
-   "centerline": 37.3,
-   "width": 68.8,
-   "anchors": 92.8,
-   "grammar": 90.3,
-   "topology": 22,
-   "finishing": 73.1,
-   "fitQuality": 20.5
+   "allPass": 8.2,
+   "pathCount": 23.8,
+   "centerline": 37.1,
+   "width": 69.1,
+   "anchors": 98,
+   "grammar": 90,
+   "topology": 22.3,
+   "finishing": 82.6,
+   "fitQuality": 35.8
   }
  },
- "_note": "floor = v2.3.1 tracer measured by the v2.4 metrics at n=400 (arbitration sweep 2026-09-02). Verdict vs fit-quality branch: 49 gains / 12 drops of 0.2-0.8% \u2014 a real thin regression tail, ratchet blocks the merge.",
+ "_note": "v2.4 baseline: merged fit-quality tracer at n=400 (arbitration 2026-09-21: 0 hard drops, 12 conditional <=1.0pt with named fixtures in test/failures/pending.js, 49 gains, net +162.9pt)",
  "n": 400
 }

@@ -148,8 +148,14 @@ node test/run-all.js
 
 - quick tier by default (stratified 147-icon subset, ~20 min);
   `--full` runs all 1,173 corpus icons (~1 h) for release gating
-- **rule: if ANY metric drops below `test/baseline.json`, the change does
-  not ship** (`run-all` exits non-zero and prints the drops)
+- **the ratchet policy** (amended 2026-09-21 by the owner):
+  - the headline — **allPass, in every tier (clean / degraded / bold) and
+    size — may NEVER drop**
+  - sub-metrics may drop **at most 1.0 point absolute**, and only if the
+    change is net-positive overall AND every dropped sub-metric gets a
+    named follow-up fixture under `test/failures/` (a concrete regressed
+    icon with a failing assertion) **in the same commit**
+  - larger drops still block (`run-all` exits non-zero and prints them)
 - when a run improves, lock the new numbers in with `--update-baseline`
 - pass thresholds are checked in at `test/corpus-harness/thresholds.json`
   (a stricter clean tier and a documented degraded tier)
