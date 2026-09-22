@@ -13,7 +13,7 @@
    "fitQuality": 58.1
   },
   "240": {
-   "allPass": 31.2,
+   "allPass": 30.9,
    "pathCount": 65.2,
    "centerline": 58.8,
    "width": 99.5,
@@ -21,7 +21,7 @@
    "grammar": 84.7,
    "topology": 55,
    "finishing": 90.8,
-   "fitQuality": 59.1
+   "fitQuality": 58.8
   },
   "480": {
    "allPass": 34,
@@ -32,7 +32,7 @@
    "grammar": 85.4,
    "topology": 59.1,
    "finishing": 91.8,
-   "fitQuality": 61.9
+   "fitQuality": 61.6
   }
  },
  "degraded": {
@@ -45,7 +45,7 @@
    "grammar": 84.9,
    "topology": 66.2,
    "finishing": 90.5,
-   "fitQuality": 58.8
+   "fitQuality": 58.6
   },
   "blur": {
    "allPass": 36.6,
@@ -56,7 +56,7 @@
    "grammar": 83.9,
    "topology": 61.9,
    "finishing": 88.7,
-   "fitQuality": 61.9
+   "fitQuality": 61.1
   },
   "rot": {
    "allPass": 37.1,
@@ -70,7 +70,7 @@
    "fitQuality": 61.6
   },
   "jpeg": {
-   "allPass": 38.6,
+   "allPass": 37.6,
    "pathCount": 80.6,
    "centerline": 87,
    "width": 99.7,
@@ -78,7 +78,7 @@
    "grammar": 84.1,
    "topology": 66.5,
    "finishing": 90.8,
-   "fitQuality": 64.7
+   "fitQuality": 63.4
   }
  },
  "fullClean": {
@@ -118,7 +118,7 @@
  },
  "bold": {
   "240": {
-   "allPass": 7.2,
+   "allPass": 4.3,
    "pathCount": 23,
    "centerline": 35.3,
    "width": 69.3,
@@ -126,10 +126,11 @@
    "grammar": 91.8,
    "topology": 22.5,
    "finishing": 82.4,
-   "fitQuality": 33.2
+   "fitQuality": 23.3,
+   "crossWeight": 21
   },
   "480": {
-   "allPass": 8.2,
+   "allPass": 4.1,
    "pathCount": 23.8,
    "centerline": 37.1,
    "width": 69.1,
@@ -137,9 +138,10 @@
    "grammar": 90,
    "topology": 22.3,
    "finishing": 82.6,
-   "fitQuality": 35.8
+   "fitQuality": 24.3,
+   "crossWeight": 22
   }
  },
- "_note": "v2.4 baseline: merged fit-quality tracer at n=400 (arbitration 2026-09-21: 0 hard drops, 12 conditional <=1.0pt with named fixtures in test/failures/pending.js, 49 gains, net +162.9pt)",
+ "_note": "floor re-set 2026-09-22: tracer=ui-v24-merged.html measured by the current harness metrics at n=400",
  "n": 400
 }
