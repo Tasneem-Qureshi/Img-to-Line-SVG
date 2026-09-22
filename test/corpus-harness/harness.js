@@ -77,7 +77,11 @@ function parseTraced(svg, traceW, span, off) {
     if (cm) cap = cap || cm[1];
     const jm = attrs.match(/stroke-linejoin="(\w+)"/);
     if (jm) join = join || jm[1];
+    const capsAttr = attrs.match(/data-caps="([^"]*)"/);
+    const capList = capsAttr ? capsAttr[1].split(' ') : [];
+    let subIdx = 0;
     for (const s of SP.parsePathData(dm[1])) {
+      s.endCaps = capList[subIdx++] || null; // 'r:b' | 'z:z' | null
       // normalize to 24-space
       for (const seg of s.cmds)
         for (const p of seg.pts) if (p.length === 2) { p[0] = p[0] * k + o0; p[1] = p[1] * k + o0; }
@@ -346,32 +350,60 @@ function evaluate(orig, tr, opts) {
         const cos = (d1[0]*d2[0] + d1[1]*d2[1]) / (l1 * l2);
         joints.push({ p, corner: cos < 0.866 }); // >30 deg break
       }
-      // clusters
+      // clusters — corner-doubling rule: a corner is ONE anchor, so two
+      // anchors within half a stroke width fail even AT a corner
       const ap = [s.cmds.length ? s.cmds[0].pts[0] : s.startPt];
       for (const c of s.cmds) ap.push(c.pts[c.pts.length - 1]);
       const lim = s.closed ? ap.length - 1 : ap.length;
       for (let i = 1; i < lim; i++) {
         const g = Math.hypot(ap[i][0]-ap[i-1][0], ap[i][1]-ap[i-1][1]);
-        if (g < wHalf) {
-          const nearCorner = joints.some(j => j.corner &&
-            (Math.hypot(j.p[0]-ap[i][0], j.p[1]-ap[i][1]) < 0.01 ||
-             Math.hypot(j.p[0]-ap[i-1][0], j.p[1]-ap[i-1][1]) < 0.01));
-          if (!nearCorner) clusterOk = false;
-        }
+        if (g < wHalf) clusterOk = false;
       }
       // smoothness: traced corner where the original is smooth
       for (const j of joints)
         if (j.corner && origTurnAt(j.p) < 0.35) smoothOk = false;
     }
-    M.fitQuality = { clusterOk, smoothOk, pass: clusterOk && smoothOk };
+    // overshoot: a traced open end must not extend past the ground-truth
+    // centerline endpoint by more than 0.25x width
+    let overshootOk = true;
+    for (const s of trLines) {
+      if (s.closed) continue;
+      for (const te of [s.poly[0], s.poly[s.poly.length - 1]]) {
+        let best = null, bd = Infinity;
+        for (const os of origLines) {
+          if (os.closed) continue;
+          for (const oe of [{ p: os.poly[0], q: os.poly[Math.min(6, os.poly.length - 1)] },
+                            { p: os.poly[os.poly.length - 1], q: os.poly[Math.max(0, os.poly.length - 7)] }]) {
+            const d = Math.hypot(te[0] - oe.p[0], te[1] - oe.p[1]);
+            if (d < bd) { bd = d; best = oe; }
+          }
+        }
+        if (!best || bd > 1.2 * EW) continue; // unmatched ends are pathCount's problem
+        let ux = best.p[0] - best.q[0], uy = best.p[1] - best.q[1];
+        const ul = Math.hypot(ux, uy) || 1;
+        const over = ((te[0] - best.p[0]) * ux + (te[1] - best.p[1]) * uy) / ul;
+        if (over > 0.25 * EW) overshootOk = false;
+      }
+    }
+    // cap type: per-end butt/round must match the original path's linecap
+    let capOk = true;
+    const wantCap = (orig.cap || 'round')[0];
+    for (const s of trLines) {
+      if (s.closed || !s.endCaps || s.endCaps === 'z:z') continue;
+      for (const cch of s.endCaps.split(':'))
+        if (cch !== 'x' && cch !== wantCap) capOk = false;
+    }
+    M.fitQuality = { clusterOk, smoothOk, overshootOk, capOk,
+      pass: clusterOk && smoothOk && overshootOk && capOk };
   }
   // 7. finishing (this corpus: round/round everywhere)
   M.finishing = { cap: tr.cap, join: tr.join,
     pass: (tr.cap === 'round' || tr.cap == null) && (tr.join === 'round' || tr.join == null) };
 
+  if (tr.crossWeight) M.crossWeight = tr.crossWeight;
   M.pass = M.pathCount.pass && M.centerline.pass && M.width.pass &&
            M.anchors.pass && M.grammar.pass && M.topology.pass && M.finishing.pass &&
-           M.fitQuality.pass;
+           M.fitQuality.pass && (!M.crossWeight || M.crossWeight.pass);
   return M;
 }
 
@@ -458,6 +490,31 @@ function main() {
         const res = traceRender(render);
         // bold renders use a padded viewBox (-3 -3 30 30) so stroke-5 fits
         tr = BOLD ? parseTraced(res.svg, res.traceW, 30, -3) : parseTraced(res.svg, res.traceW);
+        if (BOLD) {
+          // cross-weight consistency: same icon, same dots, at any weight —
+          // the bold trace must match the THIN trace's geometry and anchors
+          const resT = traceRender(loadRender(name + '@' + size));
+          const trT = parseTraced(resT.svg, resT.traceW);
+          const all = [];
+          for (const s of tr.subs) for (const p of s.poly) all.push(p);
+          let sum = 0, cnt = 0, mx = 0;
+          for (const s of trT.subs)
+            for (let i = 0; i < s.poly.length; i += 3) {
+              let bd = Infinity;
+              for (const q of all) {
+                const d = (q[0]-s.poly[i][0])**2 + (q[1]-s.poly[i][1])**2;
+                if (d < bd) bd = d;
+              }
+              bd = Math.sqrt(bd); sum += bd; cnt++; if (bd > mx) mx = bd;
+            }
+          const nT = trT.subs.reduce((a, s) => a + s.anchors, 0);
+          const nB = tr.subs.reduce((a, s) => a + s.anchors, 0);
+          tr.crossWeight = {
+            mean: cnt ? sum / cnt : 0, max: mx, anchorsThin: nT, anchorsBold: nB,
+            pass: (cnt ? sum / cnt : 0) <= 0.30 &&
+                  Math.abs(nT - nB) <= Math.max(2, Math.round(nT * 0.25))
+          };
+        }
         tr.weightsLen = res.weights.length;
         tr.pointCount = res.pointCount;
         tr.svg = res.svg; tr.traceW = res.traceW;
@@ -472,7 +529,8 @@ function main() {
   }
 
   // scorecard
-  const metrics = ['pathCount', 'centerline', 'width', 'anchors', 'grammar', 'topology', 'finishing', 'fitQuality'];
+  const metrics = ['pathCount', 'centerline', 'width', 'anchors', 'grammar', 'topology', 'finishing', 'fitQuality']
+    .concat(BOLD ? ['crossWeight'] : []);
   const bySize = {};
   for (const size of sizes) {
     const rs = rows.filter(r => r.size === size);

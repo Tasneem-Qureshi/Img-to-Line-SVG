@@ -49,22 +49,24 @@ for (const mode of ['down', 'blur', 'rot', 'jpeg']) {
 }
 
 // 4. collect current numbers
-const metrics = ['allPass', 'pathCount', 'centerline', 'width', 'anchors', 'grammar', 'topology', 'finishing', 'fitQuality'];
+const metrics = ['allPass', 'pathCount', 'centerline', 'width', 'anchors', 'grammar', 'topology', 'finishing', 'fitQuality', 'crossWeight'];
 const current = { tier: FULL ? 'full' : 'quick', n: FULL ? 1173 : +N, clean: {}, bold: {}, degraded: {} };
 for (const size of Object.keys(clean.bySize)) {
   current.clean[size] = {};
   for (const m of metrics)
-    current.clean[size][m] = +(clean.bySize[size][m] / clean.bySize[size].icons * 100).toFixed(1);
+    if (clean.bySize[size][m] != null)
+      current.clean[size][m] = +(clean.bySize[size][m] / clean.bySize[size].icons * 100).toFixed(1);
 }
 for (const size of Object.keys(bold.bySize)) {
   current.bold[size] = {};
   for (const m of metrics)
-    current.bold[size][m] = +(bold.bySize[size][m] / bold.bySize[size].icons * 100).toFixed(1);
+    if (bold.bySize[size][m] != null)
+      current.bold[size][m] = +(bold.bySize[size][m] / bold.bySize[size].icons * 100).toFixed(1);
 }
 for (const [mode, sc] of Object.entries(degraded)) {
   const a = sc.bySize['240'];
   current.degraded[mode] = {};
-  for (const m of metrics) current.degraded[mode][m] = +(a[m] / a.icons * 100).toFixed(1);
+  for (const m of metrics) if (a[m] != null) current.degraded[mode][m] = +(a[m] / a.icons * 100).toFixed(1);
 }
 
 // 5. ratchet against baseline

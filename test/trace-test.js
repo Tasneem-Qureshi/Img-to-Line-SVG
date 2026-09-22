@@ -1573,6 +1573,123 @@ console.log('46. face-calm (test/failures): thick strokes on small features');
     `min gap ${worstGap.toFixed(2)} < ${clusterLimit.toFixed(2)} at ${where}`);
 }
 
+console.log('47. bullhorn (test/failures): cross-weight consistency, corners, flat caps');
+{
+  // ground-truth bullhorn at TWO weights (thin 1.4 / bold 2.8, same geometry,
+  // padded 28-unit mapping). Reported bold defects: mouth bar overshoot with
+  // corner nubs, anchor spam + duplicate corner anchors, wave-end curls,
+  // flat caps not reproduced, handle swallowed. Same dots at any weight.
+  const H2 = require(path.join(__dirname, 'corpus-harness', 'harness.js'));
+  const SP2 = require(path.join(__dirname, 'corpus-harness', 'svgpath.js'));
+  const zlib2 = require('zlib');
+  const truth = SP2.parseIconSvg(fs.readFileSync(path.join(__dirname, 'failures', 'bullhorn.svg'), 'utf8'));
+  for (const s of truth.subpaths) s.poly = SP2.flattenSubpath(s, 8);
+  const waveTruth = truth.subpaths.filter(s => !s.closed && s.poly[0][0] > 16);
+  const results = {};
+  for (const [weight, sw] of [['thin', 1.4], ['bold', 2.8]]) {
+    const raw = zlib2.gunzipSync(fs.readFileSync(path.join(__dirname, 'failures', `bullhorn-${weight}.rgba.gz`)));
+    const w = raw.readUInt32LE(0), h = raw.readUInt32LE(4);
+    const img = { width: w, height: h, data: new Uint8ClampedArray(raw.buffer, raw.byteOffset + 8, w * h * 4) };
+    const res = H2.traceRender(img);
+    const tr = H2.parseTraced(res.svg, res.traceW, 28, -2);
+    results[weight] = tr;
+    check(`bullhorn ${weight}: one weight class`, res.weights.length === 1, `got ${res.weights.length}`);
+    check(`bullhorn ${weight}: 4 paths (body, handle, 2 waves)`, tr.subs.length === 4, `got ${tr.subs.length}`);
+    const closed = tr.subs.filter(s => s.closed);
+    check(`bullhorn ${weight}: exactly one closed body path`, closed.length === 1, `got ${closed.length}`);
+    if (closed.length === 1) {
+      const body = closed[0];
+      check(`bullhorn ${weight}: body <= 12 anchors`, body.anchors <= 12, `got ${body.anchors}`);
+      // bottom edge = one straight 2-anchor segment along y=15: its RIGHT
+      // end is the mouth-bottom CORNER (12.2,15) and must sit tight; its
+      // left end is a straight-to-arc TANGENT point — any anchor along the
+      // straight renders identically, so it only has to cover the core
+      const bottom = body.cmds.find(c => c.c === 'L' &&
+        Math.abs(c.pts[0][1] - 15) < 0.5 && Math.abs(c.pts[1][1] - 15) < 0.5 &&
+        Math.min(c.pts[0][0], c.pts[1][0]) <= 8.2 &&
+        Math.abs(Math.max(c.pts[0][0], c.pts[1][0]) - 12.2) < 0.7);
+      check(`bullhorn ${weight}: bottom edge is a 2-anchor straight`, !!bottom,
+        body.cmds.map(c => c.c).join(''));
+      // zero overshoot past the mouth bar / mouth corners (0.25x width)
+      let over = 0;
+      for (const p of body.poly) {
+        if (p[0] > 15.2 + 0.25 * sw) over++;
+        if (p[1] < 3.2 - 0.25 * sw || p[1] > 18.4 + 0.25 * sw) over++;
+      }
+      check(`bullhorn ${weight}: zero overshoot past mouth corners`, over === 0, `${over} points beyond`);
+    }
+    // corner-doubling / cluster rule: no adjacent anchors closer than 0.5w
+    let worstGap = 1e9;
+    for (const s of tr.subs) {
+      const ap = [s.cmds.length ? s.cmds[0].pts[0] : s.startPt];
+      for (const c of s.cmds) ap.push(c.pts[c.pts.length - 1]);
+      const lim = s.closed ? ap.length - 1 : ap.length;
+      for (let i = 1; i < lim; i++)
+        worstGap = Math.min(worstGap, Math.hypot(ap[i][0]-ap[i-1][0], ap[i][1]-ap[i-1][1]));
+      if (s.closed && ap.length > 2) {
+        const a = ap[0], b = ap[ap.length - 2];
+        worstGap = Math.min(worstGap, Math.hypot(a[0]-b[0], a[1]-b[1]));
+      }
+    }
+    check(`bullhorn ${weight}: no anchor pair closer than 0.5w (corners included)`,
+      worstGap >= 0.5 * sw, `min gap ${worstGap.toFixed(2)} < ${(0.5 * sw).toFixed(2)}`);
+    // handle: open path with ends at (7.8,15) and (11.8,15)
+    const handle = tr.subs.find(s => !s.closed &&
+      s.poly.some(p => p[1] > 17.5 && p[0] > 8 && p[0] < 11.5));
+    check(`bullhorn ${weight}: U handle present`, !!handle, 'not found');
+    if (handle) {
+      const e0 = handle.poly[0], e1 = handle.poly[handle.poly.length - 1];
+      const near = (p, x, y) => Math.hypot(p[0]-x, p[1]-y) < 0.7;
+      check(`bullhorn ${weight}: handle ends on the body edge`,
+        (near(e0, 7.8, 15) && near(e1, 11.8, 15)) || (near(e0, 11.8, 15) && near(e1, 7.8, 15)),
+        `${e0.map(v=>v.toFixed(1))} / ${e1.map(v=>v.toFixed(1))}`);
+    }
+    // waves: <=4 anchors, flat-capped (anchor at the ink face = authored end)
+    const waves = tr.subs.filter(s => !s.closed && s !== handle && s.poly[0][0] > 15.5);
+    check(`bullhorn ${weight}: two wave arcs`, waves.length === 2, `got ${waves.length}`);
+    for (const wv of waves) {
+      const len = SP2.polyLength(wv.poly);
+      const big = len > 8;
+      const gt = waveTruth.find(t => (SP2.polyLength(t.poly) > 8) === big);
+      check(`bullhorn ${weight}: ${big ? 'big' : 'small'} wave <= 4 anchors`, wv.anchors <= 4, `got ${wv.anchors}`);
+      if (gt) {
+        const te = [gt.poly[0], gt.poly[gt.poly.length - 1]];
+        const we = [wv.poly[0], wv.poly[wv.poly.length - 1]];
+        const d = Math.min(
+          Math.hypot(we[0][0]-te[0][0], we[0][1]-te[0][1]) + Math.hypot(we[1][0]-te[1][0], we[1][1]-te[1][1]),
+          Math.hypot(we[0][0]-te[1][0], we[0][1]-te[1][1]) + Math.hypot(we[1][0]-te[0][0], we[1][1]-te[0][1])) / 2;
+        // end budget per the spec: 0.25x stroke width past/short of the face
+        check(`bullhorn ${weight}: ${big ? 'big' : 'small'} wave flat ends AT the ink face`,
+          d <= 0.25 * sw, `mean end offset ${d.toFixed(2)}`);
+      }
+    }
+  }
+  // cross-weight: same geometry, same dots at any weight
+  if (results.thin && results.bold && results.thin.subs.length === results.bold.subs.length) {
+    const nT = results.thin.subs.reduce((a, s) => a + s.anchors, 0);
+    const nB = results.bold.subs.reduce((a, s) => a + s.anchors, 0);
+    check('bullhorn cross-weight: total anchors match within 2', Math.abs(nT - nB) <= 2, `${nT} vs ${nB}`);
+    let sum = 0, n = 0, mx = 0;
+    const all = [];
+    for (const s of results.bold.subs) for (const p of s.poly) all.push(p);
+    for (const s of results.thin.subs)
+      for (let i = 0; i < s.poly.length; i += 3) {
+        let bd = Infinity;
+        for (const q of all) {
+          const d = (q[0]-s.poly[i][0])**2 + (q[1]-s.poly[i][1])**2;
+          if (d < bd) bd = d;
+        }
+        bd = Math.sqrt(bd); sum += bd; n++; if (bd > mx) mx = bd;
+      }
+    check('bullhorn cross-weight: centerlines match (mean <= 0.21 = 0.15x thin w)',
+      sum / n <= 0.21, `mean ${(sum/n).toFixed(3)}`);
+    check('bullhorn cross-weight: centerlines match (max <= 0.7)', mx <= 0.7, `max ${mx.toFixed(2)}`);
+  } else {
+    check('bullhorn cross-weight: path counts match', false,
+      `${results.thin && results.thin.subs.length} vs ${results.bold && results.bold.subs.length}`);
+  }
+}
+
 // --- write a sample SVG for eyeballing -------------------------------------
 {
   const img = makeImage(300, 200, WHITE);

@@ -660,6 +660,215 @@ const LineTracer = (() => {
     };
 
     let list = chains.slice();
+    // corner-tip spurs -> forced corner apexes (must run BEFORE pairing so
+    // the pool's arms fuse through the true corner instead of around it)
+    {
+      const att = (c, e) => c.endDeg && c.endDeg[e] > 2;
+      const endPt = (c, e) => e === 0 ? c.points[0] : c.points[c.points.length - 1];
+      const spurs = [], others = [];
+      list.forEach((c, ci) => {
+        const len = c.geomLength || c.points.length;
+        const W = Math.max(c.width || 1, ((c.endWidths || [0, 0])[0] + (c.endWidths || [0, 0])[1]) / 2);
+        let tagged = false;
+        if (!c.closed && len < 1.25 * W) {
+          for (const e of [0, 1]) {
+            const o2 = 1 - e;
+            if (att(c, e) && (!c.endDeg || c.endDeg[o2] <= 1)) {
+              // short, one junction end, one free end: candidate corner-tip
+              // branch (validated against the arms' bisector below — corner
+              // spurs do NOT taper, they sit inside the fat corner wedge)
+              const jp2 = (c.trim && c.trim[e] && c.trim[e].p) || endPt(c, e);
+              const tip = endPt(c, o2);
+              const dl = Math.hypot(tip[0] - jp2[0], tip[1] - jp2[1]) || 1;
+              spurs.push({ ci, jp: jp2, tip, W,
+                jr: Math.max((c.trim && c.trim[e] && c.trim[e].r) || 0, W),
+                dir: [(tip[0] - jp2[0]) / dl, (tip[1] - jp2[1]) / dl] });
+              tagged = true;
+              break;
+            }
+          }
+        }
+        if (!tagged) others.push(ci);
+      });
+      const drop = new Set();
+      const jpOf = (c, e) => (c.trim && c.trim[e] && c.trim[e].p) || endPt(c, e);
+      // Prepare an arm (ordered ending AT the junction) for fusing through
+      // an apex. Inside the pool the medial axis curls off the centerline,
+      // so the tail is cut back to the deepest point whose LOCAL TANGENT
+      // aims at the apex with the straight jump to the apex fully inked —
+      // that point is where the corner's leg genuinely starts. When no such
+      // point exists the arm lies BEYOND a second corner whose connecting
+      // leg was swallowed whole by the pool (a bold-weight diagonal between
+      // two joints): rebuild that second corner by sliding along the arm's
+      // own tangent to the pivot whose leg to the apex stays inked.
+      const inkAt2 = (x, y) => {
+        const xi = Math.round(x - 0.5), yi = Math.round(y - 0.5);
+        return xi >= 0 && yi >= 0 && xi < inkCtx.w && yi < inkCtx.h &&
+               inkCtx.ink[yi * inkCtx.w + xi] === 1;
+      };
+      // a corner LEG is a centerline segment: continuously inked AND
+      // centered in its band — a parallel path offset inside a fat stroke
+      // is inked too, but hugs one edge
+      const legMeasure = (p, q, w2, fList) => {
+        const L = Math.hypot(q[0] - p[0], q[1] - p[1]);
+        const nS = Math.max(2, Math.ceil(L / 3));
+        let holes = 0;
+        for (let i = 1; i < nS; i++)
+          if (!inkAt2(p[0] + (q[0] - p[0]) * i / nS, p[1] + (q[1] - p[1]) * i / nS)) holes++;
+        if (holes > Math.max(2, nS * 0.08)) return null;
+        const ux = (q[0] - p[0]) / (L || 1), uy = (q[1] - p[1]) / (L || 1);
+        const cap = w2 * 0.8, floor2 = w2 * 0.28;
+        let asym = 0;
+        for (const f of (fList || [0.3, 0.5, 0.7])) {
+          const x = p[0] + (q[0] - p[0]) * f, y = p[1] + (q[1] - p[1]) * f;
+          let sPos = 0, sNeg = 0;
+          while (sPos < cap && inkAt2(x - uy * (sPos + 1), y + ux * (sPos + 1))) sPos += 1;
+          while (sNeg < cap && inkAt2(x + uy * (sNeg + 1), y - ux * (sNeg + 1))) sNeg += 1;
+          // both edges reachable and roughly balanced: an offset-parallel
+          // path inside a fat band is inked but hugs one edge
+          if (Math.min(sPos, sNeg) < floor2) return null;
+          if (Math.abs(sPos - sNeg) > 0.2 * (sPos + sNeg)) return null;
+          asym += Math.abs(sPos - sNeg);
+        }
+        return asym / 3;
+      };
+      const legOk = (p, q, w2) => legMeasure(p, q, w2) != null;
+      const armPrep = (pts, width, apex) => {
+        const n = pts.length;
+        const w2 = Math.max(4, width || 4);
+        if (!inkCtx || n < 8) return { pts, corner2: null };
+        const maxCut = Math.min(n - 4, Math.round(w2 * 2.5));
+        const win = Math.max(4, Math.round(w2 / 3));
+        const tangentAt = i => {
+          const a = pts[Math.max(0, i - win)], b = pts[i];
+          const dx = b[0] - a[0], dy = b[1] - a[1];
+          const l = Math.hypot(dx, dy) || 1;
+          return [dx / l, dy / l];
+        };
+        let kStable = -1;
+        for (let k = 0; k <= maxCut; k++) {
+          const i = n - 1 - k;
+          const E = pts[i];
+          const T = tangentAt(i);
+          const jx = apex[0] - E[0], jy = apex[1] - E[1];
+          const jl = Math.hypot(jx, jy);
+          if (jl < 2) return { pts: pts.slice(0, i + 1), corner2: null };
+          // trustworthy centerline points have a STABLE tangent — a pool
+          // curl's direction changes within half a window, and its span or
+          // aim can accidentally look right while pointing into the wedge
+          const T2 = tangentAt(Math.max(win, i - win));
+          const stable = T[0] * T2[0] + T[1] * T2[1] > 0.98;
+          if (stable && kStable < 0) kStable = k;
+          if (stable && T[0] * jx / jl + T[1] * jy / jl > 0.9 && legOk(E, apex, w2))
+            return { pts: pts.slice(0, i + 1), corner2: null };
+        }
+        // no depth aims at the apex: second-corner case — the leg between
+        // this arm and the apex was swallowed whole by the pool. Anchor at
+        // the first clean point and probe along the tangent for the pivot.
+        const i0 = n - 1 - (kStable < 0 ? maxCut : kStable);
+        const E = pts[i0], T = tangentAt(i0);
+        // pick the pivot whose leg to the apex is MOST CENTERED in ink —
+        // judged on the leg's MIDDLE (its ends sit in merged joint ink at
+        // both the pivot pool and the apex wedge). Among near-equal pivots
+        // the NEAREST wins: asym flattens once the leg leaves the pool, and
+        // drifting farther only overshoots the corner.
+        let best = null, bestAsym = Infinity;
+        for (let t = 0; t <= w2 * 3; t += 2) {
+          const c2 = [E[0] + T[0] * t, E[1] + T[1] * t];
+          if (t > 4 && !legOk(E, c2, w2)) break;
+          const dxA = apex[0] - c2[0], dyA = apex[1] - c2[1];
+          const dA2 = Math.hypot(dxA, dyA);
+          if (dA2 < w2) break; // pivot collapsing into the apex
+          // the pivot must be a genuine bend, not a collinear waypoint
+          const bend = T[0] * dxA / dA2 + T[1] * dyA / dA2;
+          if (bend > 0.94) continue;
+          const asym = legMeasure(c2, apex, w2, [0.4, 0.55, 0.7]);
+          if (asym != null && asym < bestAsym - w2 * 0.04) { bestAsym = asym; best = c2; }
+        }
+        return { pts: pts.slice(0, i0 + 1), corner2: best };
+      };
+      for (const sp of spurs) {
+        // collect the junction pool's attached arms, matched by remembered
+        // junction (trim) points: at bold weights the trimmed arm endpoints
+        // retract far outside the pool
+        const cand = [];
+        for (const ci of others) {
+          const c = list[ci];
+          if (c.closed) continue;
+          if ((c.geomLength || c.points.length) < (c.width || 1) * 1.2) continue;
+          for (const e of [0, 1]) {
+            if (!att(c, e)) continue;
+            const jr2 = (c.trim && c.trim[e] && c.trim[e].r) || sp.W;
+            const d = Math.hypot(jpOf(c, e)[0] - sp.jp[0], jpOf(c, e)[1] - sp.jp[1]);
+            if (d < Math.max(sp.jr || 0, jr2) * 1.3) cand.push({ ci, e, d });
+          }
+        }
+        // the corner's true arms: the pair that (a) forms a CORNER, not a
+        // T-junction — a stem at a straight-through junction is a real
+        // stroke, never a spur — and (b) has the spur on its outer bisector,
+        // pointing at the tip. In a fused blob several strokes crowd the
+        // pool: prefer the passing pair closest to the spur's junction.
+        let arms = null, bestScore = Infinity;
+        for (let i2 = 0; i2 < cand.length; i2++) {
+          for (let j2 = i2 + 1; j2 < cand.length; j2++) {
+            const A2 = cand[i2], B2 = cand[j2];
+            if (A2.ci === B2.ci) continue;
+            // a corner's two legs are the same drawn stroke: same width.
+            // Mismatched arms are a stroke plus cap/knot debris, not a corner
+            const wA2 = list[A2.ci].width || 1, wB2 = list[B2.ci].width || 1;
+            if (Math.max(wA2, wB2) / Math.max(0.01, Math.min(wA2, wB2)) > 1.6) continue;
+            const dA2 = dirAt(list[A2.ci], A2.e), dB2 = dirAt(list[B2.ci], B2.e);
+            // a corner's legs TURN (inward dirs at most ~140 degrees apart);
+            // a stroke passing straight through the pool is a T/X junction,
+            // and a curved rim's halves must not read as a corner either
+            if (dA2[0] * dB2[0] + dA2[1] * dB2[1] < -0.75) continue;
+            let bx2 = -(dA2[0] + dB2[0]), by2 = -(dA2[1] + dB2[1]);
+            const bl2 = Math.hypot(bx2, by2);
+            if (bl2 < 0.3) continue;
+            bx2 /= bl2; by2 /= bl2;
+            // real corner spurs bisect their arms almost exactly (measured
+            // 0.92-1.00); a T-junction stub vs a rim arm scores ~0.7
+            if (Math.abs(sp.dir[0] * bx2 + sp.dir[1] * by2) < 0.88) continue;
+            const score = A2.d + B2.d;
+            if (score < bestScore) { bestScore = score; arms = [A2, B2]; }
+          }
+        }
+        if (!arms) continue;
+        const [A, B] = arms;
+        const a = list[A.ci], b = list[B.ci];
+        const apex = sp.tip.slice();
+        const prepA = armPrep(
+          A.e === 1 ? a.points.slice() : a.points.slice().reverse(), a.width, apex);
+        const prepB = armPrep(
+          B.e === 0 ? b.points.slice().reverse() : b.points.slice(), b.width, apex);
+        const ptsA = prepA.corner2 ? prepA.pts.concat([prepA.corner2]) : prepA.pts;
+        const ptsB = (prepB.corner2 ? prepB.pts.concat([prepB.corner2]) : prepB.pts).reverse();
+        const extraForced = [];
+        if (prepA.corner2) extraForced.push(prepA.corner2);
+        if (prepB.corner2) extraForced.push(prepB.corner2);
+        const lenA = a.geomLength != null ? a.geomLength : a.points.length;
+        const lenB = b.geomLength != null ? b.geomLength : b.points.length;
+        const ew = ch => ch.endWidths || [ch.width || 1, ch.width || 1];
+        list.push({
+          closed: false,
+          forced: (a.forced || []).concat(b.forced || [], extraForced, [apex]),
+          points: ptsA.concat([apex], ptsB),
+          width: ((a.width || 1) * lenA + (b.width || 1) * lenB) / ((lenA + lenB) || 1),
+          geomLength: lenA + lenB +
+            Math.hypot(apex[0] - ptsA[ptsA.length - 1][0], apex[1] - ptsA[ptsA.length - 1][1]) +
+            Math.hypot(ptsB[0][0] - apex[0], ptsB[0][1] - apex[1]),
+          endDeg: [A.e === 1 ? a.endDeg[0] : a.endDeg[1], B.e === 0 ? b.endDeg[1] : b.endDeg[0]],
+          endWidths: [A.e === 1 ? ew(a)[0] : ew(a)[1], B.e === 0 ? ew(b)[1] : ew(b)[0]],
+          trim: [a.trim ? a.trim[1 - A.e] : null, b.trim ? b.trim[1 - B.e] : null]
+        });
+        drop.add(sp.ci); drop.add(A.ci); drop.add(B.ci);
+        // an arm may serve only one spur-fuse per pass
+        others.splice(others.indexOf(A.ci), 1);
+        others.splice(others.indexOf(B.ci), 1);
+        others.push(list.length - 1);
+      }
+      if (drop.size) list = list.filter((_, ci) => !drop.has(ci));
+    }
     for (let round = 0; round < 4; round++) {
       const ends = [];
       list.forEach((c, ci) => {
@@ -688,17 +897,25 @@ const LineTracer = (() => {
           const cos = A.dir[0] * B.dir[0] + A.dir[1] * B.dir[1];
           // distant ends (big junction blobs) may only bridge when nearly
           // perfectly collinear — loose gates here misroute across junctions
-          const far = Math.hypot(dx, dy) > 6;
-          if (cos > (far ? -0.85 : -0.55)) continue;
+          const far = Math.hypot(dx, dy) > Math.max(6, (A.jr + B.jr) * 0.15);
+          // a long chain whose BOTH ends land in one pool is a ring whose
+          // last gap is that pool — end tangents inside a fused blob are
+          // noisy, so the direction gate relaxes (length is the evidence)
+          const ring = A.ci === B.ci &&
+            (list[A.ci].geomLength || list[A.ci].points.length) >
+              8 * (list[A.ci].width || 1);
+          if (cos > (ring ? -0.25 : far ? -0.85 : -0.55)) continue;
           const ratio = Math.max(A.width, B.width) / Math.max(0.01, Math.min(A.width, B.width));
           if (ratio > (far ? 1.35 : 1.7)) continue;
           pairs.push({ A, B, cos });
         }
       }
       if (!pairs.length) break;
-      pairs.sort((a, b) =>
-        (a.cos + (a.A.frag || a.B.frag ? 0.12 : 0)) -
-        (b.cos + (b.A.frag || b.B.frag ? 0.12 : 0))); // straightest first; knot fragments yield
+      // straightest first; knot fragments yield; a ring closing beats a
+      // side stroke stealing one of its ends
+      const rank = p => p.cos + (p.A.frag || p.B.frag ? 0.12 : 0) -
+        (p.A.ci === p.B.ci ? 0.3 : 0);
+      pairs.sort((a, b) => rank(a) - rank(b));
 
       const usedChain = new Set(), usedEnd = new Set();
       const endKey = t => t.ci + ':' + t.e;
@@ -1083,21 +1300,78 @@ const LineTracer = (() => {
       const a = c.points[0], b = c.points[c.points.length - 1];
       if (Math.hypot(a[0] - b[0], a[1] - b[1]) < len * 0.15) c.closed = true;
     }
-    // unpaired trimmed ends (a line terminating INTO another): extend
-    // straight back to the junction center so the joint visually connects
+    // unpaired trimmed ends (a line terminating INTO another): extend the
+    // stroke along its OWN tangent until it crosses the partner's traced
+    // centerline — the pool centroid of a fused blob sits off both
+    // centerlines and would bend the joint. Fallback: the pool center.
+    const extTarget = (c, e, tr) => {
+      const end = e === 0 ? c.points[0] : c.points[c.points.length - 1];
+      // width-deep tangent as the base aim; the end curls in the pool, so
+      // refine with a FAN: the true attach direction crosses the partner's
+      // band perpendicularly, giving the SHORTEST run to the far edge
+      const kd = Math.min(c.points.length - 1, Math.max(7, Math.round((c.width || 2) * 0.35)));
+      const pDeep = e === 0 ? c.points[kd] : c.points[c.points.length - 1 - kd];
+      let ox = end[0] - pDeep[0], oy = end[1] - pDeep[1];
+      const ol = Math.hypot(ox, oy) || 1;
+      ox /= ol; oy /= ol; // outward
+      if (!inkCtx) return tr.p;
+      // walk the ray THROUGH the joint's ink to the far edge of the stroke
+      // this one terminates against, then back off half a width: that is
+      // the partner's centerline, independent of how its own traced points
+      // wobble inside the pool
+      const at = (x, y) => {
+        const xi = Math.round(x - 0.5), yi = Math.round(y - 0.5);
+        return xi >= 0 && yi >= 0 && xi < inkCtx.w && yi < inkCtx.h &&
+               inkCtx.ink[yi * inkCtx.w + xi] === 1;
+      };
+      // walk the ray to the first crossing of a partner's SEGMENT interior
+      // (a sibling's own retracted end converging into the same pool is not
+      // the stroke this one terminates against); fall back to the pool center
+      const dToTrim = Math.hypot(tr.p[0] - end[0], tr.p[1] - end[1]);
+      const maxT = dToTrim + Math.max(tr.r || 0, c.width || 2) * 1.5;
+      for (let t = 2; t <= maxT; t += 2) {
+        const x = end[0] + ox * t, y = end[1] + oy * t;
+        for (const o of list) {
+          if (o === c) continue;
+          const pts = o.points;
+          const oW = (o.width || 2);
+          for (let k = 0; k + 2 < pts.length; k += 2) {
+            const ax = pts[k][0], ay = pts[k][1];
+            const bx2 = pts[k + 2][0], by2 = pts[k + 2][1];
+            const vx2 = bx2 - ax, vy2 = by2 - ay;
+            const L3 = vx2 * vx2 + vy2 * vy2;
+            let u2 = L3 > 0 ? ((x - ax) * vx2 + (y - ay) * vy2) / L3 : 0;
+            u2 = Math.max(0, Math.min(1, u2));
+            const dd = (ax + vx2 * u2 - x) ** 2 + (ay + vy2 * u2 - y) ** 2;
+            if (dd < 9) {
+              if (!o.closed) {
+                const pA = pts[0], pZ = pts[pts.length - 1];
+                const dEnd = Math.min(Math.hypot(pA[0] - x, pA[1] - y),
+                                      Math.hypot(pZ[0] - x, pZ[1] - y));
+                if (dEnd < oW * 0.8) continue;
+              }
+              return [x, y];
+            }
+          }
+        }
+      }
+      return tr.p;
+    };
     for (const c of list) {
       if (!c.trim) continue;
       if (c.trim[0]) {
+        const q = extTarget(c, 0, c.trim[0]);
         c.geomLength = (c.geomLength || c.points.length) +
-          Math.hypot(c.trim[0].p[0] - c.points[0][0], c.trim[0].p[1] - c.points[0][1]);
-        c.points = [c.trim[0].p].concat(c.points);
+          Math.hypot(q[0] - c.points[0][0], q[1] - c.points[0][1]);
+        c.points = [q].concat(c.points);
         c.trim[0] = null;
       }
       if (c.trim[1]) {
         const last = c.points[c.points.length - 1];
+        const q = extTarget(c, 1, c.trim[1]);
         c.geomLength = (c.geomLength || c.points.length) +
-          Math.hypot(c.trim[1].p[0] - last[0], c.trim[1].p[1] - last[1]);
-        c.points = c.points.concat([c.trim[1].p]);
+          Math.hypot(q[0] - last[0], q[1] - last[1]);
+        c.points = c.points.concat([q]);
         c.trim[1] = null;
       }
     }
@@ -1264,7 +1538,7 @@ const LineTracer = (() => {
     // window the joint tangent: ±1 pixel neighbors quantize it to 45° steps,
     // and on THICK strokes the skeleton wobbles at width scale — the window
     // must grow with the stroke or every split seeds a lumpy handle
-    const kw = Math.max(4, Math.min(40, Math.round((w || 0) * 0.5)));
+    const kw = Math.max(4, Math.round((w || 0) * 0.5));
     const k1 = Math.min(kw, splitPoint - first), k2 = Math.min(kw, last - splitPoint);
     const tCenter = V.norm(V.sub(pts[splitPoint - k1], pts[splitPoint + k2]));
     fitCubic(pts, first, splitPoint, tHat1, tCenter, tol, out, depth + 1, w);
@@ -1313,9 +1587,15 @@ const LineTracer = (() => {
       const chord = Math.hypot(p3[0] - p0[0], p3[1] - p0[1]);
       if (chord >= 1) {
         const dx = (p3[0] - p0[0]) / chord, dy = (p3[1] - p0[1]) / chord;
-        let maxD = 0;
-        for (const p of pts) maxD = Math.max(maxD, Math.abs(dy * (p[0] - p0[0]) - dx * (p[1] - p0[1])));
-        if (maxD <= Math.min(tol, Math.max(1.5, tol * 0.35, chord * 0.04))) return { line: [p0.slice(), p3.slice()] };
+        let maxD = 0, devSum = 0;
+        for (const p of pts) {
+          const d = dy * (p[0] - p0[0]) - dx * (p[1] - p0[1]);
+          devSum += d;
+          if (Math.abs(d) > maxD) maxD = Math.abs(d);
+        }
+        const oneSigned = Math.abs(devSum / pts.length) > 0.02 * chord + 1;
+        const lineGate = Math.min(tol, Math.max(1.5, oneSigned ? chord * 0.04 : Math.max(tol * 0.35, chord * 0.04)));
+        if (maxD <= lineGate) return { line: [p0.slice(), p3.slice()] };
       }
       if (a.line && b.line) return null;
     }
@@ -1393,9 +1673,11 @@ const LineTracer = (() => {
         const j = (i + 1) % segs.length;
         const a = segs[i], b = segs[j];
         const joint = segEnd(a);
-        if (guarded(joint)) continue;
         const d1 = segInDir(a), d2 = segOutDir(b);
         const cos = d1[0]*d2[0] + d1[1]*d2[1];
+        // a guarded anchor between two COLLINEAR lines guards nothing — the
+        // "corner" it marks does not exist (seam litter, run boundaries)
+        if (guarded(joint) && !(a.line && b.line && cos > 0.995)) continue;
         const la = Math.hypot(segEnd(a)[0]-segStart(a)[0], segEnd(a)[1]-segStart(a)[1]);
         const lb = Math.hypot(segEnd(b)[0]-segStart(b)[0], segEnd(b)[1]-segStart(b)[1]);
         const cluster = Math.min(la, lb) < clusterLim;
@@ -1451,7 +1733,10 @@ const LineTracer = (() => {
       const a = segs[i], b = segs[j];
       if (a.line && b.line) continue;
       const joint = segEnd(a);
-      if (guarded(joint)) continue;
+      // a protected anchor's POSITION is sacred, its tangent is not: at a
+      // near-tangent line<->curve joint the curve's handle still aligns to
+      // the line, else every straight-to-arc anchor renders as a kink
+      if (guarded(joint) && !(a.line || b.line)) continue;
       const d1 = segInDir(a), d2 = segOutDir(b);
       const cos = d1[0]*d2[0] + d1[1]*d2[1];
       if (cos < 0.966 || cos > 0.99995) continue; // rotate handles only a few degrees
@@ -1503,12 +1788,20 @@ const LineTracer = (() => {
       if (chord > 4) {
         const inv = 1 / chord;
         const dx = (p1[0] - p0[0]) * inv, dy = (p1[1] - p0[1]) * inv;
-        let maxD = 0;
+        let maxD = 0, devSum = 0, devN = 0;
         for (let i = 1; i < last; i++) {
-          const d = Math.abs(dy * (arr[i][0] - p0[0]) - dx * (arr[i][1] - p0[1]));
-          if (d > maxD) maxD = d;
+          const d = dy * (arr[i][0] - p0[0]) - dx * (arr[i][1] - p0[1]);
+          devSum += d; devN++;
+          if (Math.abs(d) > maxD) maxD = Math.abs(d);
         }
-        if (maxD <= Math.max(1.5, Math.min(tol * 0.9, Math.max(SW * 0.12, chord * 0.04)))) {
+        // sign-aware: quantization wobble on thick strokes alternates sign,
+        // so the width floor may forgive it; an arc's sagitta is ONE-signed
+        // and must never pass via the width floor (a bold arc span's sagitta
+        // can sit below 0.12w)
+        const oneSigned = devN > 0 && Math.abs(devSum / devN) > 0.02 * chord + 1;
+        const gate = Math.max(1.5, Math.min(tol * 0.9,
+          oneSigned ? chord * 0.04 : Math.max(SW * 0.12, chord * 0.04)));
+        if (maxD <= gate) {
           let a = p0.slice(), b = p1.slice();
           // snap almost-horizontal/vertical ruler lines exactly straight
           if (Math.abs(b[1] - a[1]) <= Math.max(2, chord * 0.012)) {
@@ -1534,7 +1827,7 @@ const LineTracer = (() => {
       // terminal tangent window: moderate — wide enough to shrug off cap
       // wander, narrow enough not to blunt corner-adjacent spans (the
       // cleanup pass dissolves any residual terminal lumps)
-      const k = Math.max(1, Math.min(Math.max(10, Math.min(30, Math.round(SW * 0.25))), Math.floor(last / 3) || 1));
+      const k = Math.max(1, Math.min(Math.max(10, Math.round(SW * 0.25)), Math.floor(last / 3) || 1));
       fitCubic(arr, 0, last,
         t1 || V.norm(V.sub(arr[k], arr[0])),
         t2 || V.norm(V.sub(arr[last - k], arr[last])),
@@ -1735,7 +2028,7 @@ const LineTracer = (() => {
     // smaller radius or close-by corners (an L-joint next to a diagonal
     // transition) merge into one detection whose tangents point along the
     // wrong legs.
-    const w = Math.max(2, Math.min(120, Math.round(Math.max(6, tol * 4.25)), n >> 3));
+    const w = Math.max(2, Math.min(200, Math.round(Math.max(6, tol * 4.25)), n >> 3));
     const wSup = Math.max(3, Math.min(w, Math.round(tol * 1.9)));
     const turnWin = (i, win) => {
       const a = closed ? pts[(i - win + n) % n] : pts[Math.max(0, i - win)];
@@ -1769,8 +2062,11 @@ const LineTracer = (() => {
       }
       if (isMax) corners.push(i);
     }
+    const forcedIdx = new Set();
     if (forcedPts) {
-      // reconstructed apexes are corners by construction — force them in
+      // reconstructed apexes are corners by construction and AUTHORITATIVE:
+      // a nearby detection is the same joint seen through pool noise — the
+      // forced index replaces it, never defers to it
       for (const f of forcedPts) {
         let bi = -1, bd = 9;
         for (let i = 0; i < n; i++) {
@@ -1779,9 +2075,18 @@ const LineTracer = (() => {
         }
         if (bi < 0) continue;
         if (!closed && (bi <= w || bi >= n - 1 - w)) continue;
-        if (!corners.some(ci => Math.abs(ci - bi) <= w)) corners.push(bi);
+        for (let m = corners.length - 1; m >= 0; m--) {
+          const dIdx = closed
+            ? Math.min(Math.abs(corners[m] - bi), n - Math.abs(corners[m] - bi))
+            : Math.abs(corners[m] - bi);
+          if (dIdx <= w && !forcedIdx.has(corners[m])) corners.splice(m, 1);
+        }
+        corners.push(bi);
+        forcedIdx.add(bi);
       }
       corners.sort((a, b) => a - b);
+      for (let m = corners.length - 1; m > 0; m--)
+        if (corners[m] === corners[m - 1]) corners.splice(m, 1);
     }
     // rebuild each detected corner's true apex: thinning retracts from a
     // convex corner by ~width/2 and smoothing rounds it further, so the
@@ -1804,13 +2109,17 @@ const LineTracer = (() => {
         return Math.sign((b[0] - a[0]) * (c2[1] - b[1]) - (b[1] - a[1]) * (c2[0] - b[0]));
       };
       for (let m = 0; m + 1 < corners.length; ) {
-        if (corners[m + 1] - corners[m] < zMerge &&
-            turnSign(corners[m]) === turnSign(corners[m + 1])) {
-          corners.splice(m, 2, Math.round((corners[m] + corners[m + 1]) / 2));
+        const fa = forcedIdx.has(corners[m]), fb = forcedIdx.has(corners[m + 1]);
+        if (corners[m + 1] - corners[m] < zMerge && !(fa && fb) &&
+            (fa || fb || turnSign(corners[m]) === turnSign(corners[m + 1]))) {
+          // a forced apex absorbs its noisy neighbor; two detections average
+          corners.splice(m, 2, fa ? corners[m] : fb ? corners[m + 1]
+            : Math.round((corners[m] + corners[m + 1]) / 2));
         } else m++;
       }
       for (let m = 0; m < corners.length; m++) {
         const ci = corners[m];
+        if (forcedIdx.has(ci)) continue; // the apex coordinate IS the truth
         // tangent arms must stay clear of the NEIGHBORING corner's zone — a
         // tangent measured across the next corner points along the wrong leg
         // and projects the apex far past the true joint
@@ -1927,7 +2236,7 @@ const LineTracer = (() => {
     if (n === 0) return '';
     if (n === 1) return `M ${fmt(p[0][0])} ${fmt(p[0][1])} l 0.01 0`;
     if (smooth && n >= 3) {
-      const segs = fitChain(p, !!chain.closed, tol || 1.5, cornersOut, chain.forcedPts, inkCtx, chain.width);
+      const segs = fitChain(p, !!chain.closed, tol || 1.5, cornersOut, chain.forcedPts, inkCtx, chain.fitW || chain.width);
       if (segs.length) {
         const start = segs[0].line ? segs[0].line[0] : segs[0][0];
         let d = `M ${fmt(start[0])} ${fmt(start[1])}`;
@@ -1949,16 +2258,36 @@ const LineTracer = (() => {
   // before curve fitting — the standard vectorization step that removes
   // staircase zigzag from upscaled sources and edge-roughness oscillation.
   // Endpoints stay pinned so junction connections are preserved.
-  function smoothChain(points, closed, radius) {
+  function smoothChain(points, closed, radius, pins) {
     const n = points.length;
-    const r = Math.max(1, Math.min(40, Math.round(radius))); // scale-invariant: no low cap
+    const r = Math.max(1, Math.min(160, Math.round(radius))); // guard only; callers pass width-relative radii
     if (n < 2 * r + 3) return points;
+    // rebuilt corner apexes are exact geometry: the window tapers to zero
+    // toward them (like open ends) so the polyline APPROACHES the apex
+    // instead of rounding past it — else the forced anchor becomes a spike
+    let pinDist = null;
+    if (pins && pins.length) {
+      pinDist = new Float64Array(n).fill(1e9);
+      for (const pi of pins) if (pi >= 0 && pi < n) pinDist[pi] = 0;
+      const laps = closed ? 2 : 1;
+      for (let l = 0; l < laps; l++) {
+        for (let i = 0; i < n; i++) {
+          const prev = pinDist[(i - 1 + n) % n];
+          if (prev + 1 < pinDist[i]) pinDist[i] = prev + 1;
+        }
+        for (let i = n - 1; i >= 0; i--) {
+          const nxt = pinDist[(i + 1) % n];
+          if (nxt + 1 < pinDist[i]) pinDist[i] = nxt + 1;
+        }
+      }
+    }
     let pts = points;
     for (let pass = 0; pass < 2; pass++) {
       const out = new Array(n);
       for (let i = 0; i < n; i++) {
         let rr = r;
         if (!closed) rr = Math.min(r, i, n - 1 - i); // taper at open ends
+        if (pinDist) rr = Math.min(rr, pinDist[i]);
         if (rr === 0) { out[i] = pts[i]; continue; }
         let sx = 0, sy = 0, c = 0;
         for (let k = -rr; k <= rr; k++) {
@@ -1981,9 +2310,16 @@ const LineTracer = (() => {
   // normal for the two ink edges and move the point to their midpoint.
   // Corrections are skipped where the ink is wider than the stroke (junction
   // pools, joints) and clamped so a bad probe can't fling a point away.
-  function recenterOnInk(pts, closed, width, ink, w, h) {
+  function recenterOnInk(pts, closed, width, ink, w, h, avoid) {
     const n = pts.length;
     if (n < 5) return;
+    const avoidR2 = (width * 1.2) ** 2;
+    const nearAvoid = p => {
+      if (!avoid) return false;
+      for (const q of avoid)
+        if ((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 < avoidR2) return true;
+      return false;
+    };
     const inkAt = (x, y) => {
       const xi = Math.round(x - 0.5), yi = Math.round(y - 0.5);
       return xi >= 0 && yi >= 0 && xi < w && yi < h && ink[yi * w + xi] === 1;
@@ -2012,6 +2348,7 @@ const LineTracer = (() => {
       if (nl < 1e-6) continue;
       nx /= nl; ny /= nl;
       const p = pts[i];
+      if (nearAvoid(p)) continue; // corner wedges: ink median != centerline
       if (!inkAt(p[0], p[1])) continue;
       let tPos = 0, tNeg = 0;
       while (tPos < half && inkAt(p[0] + nx * (tPos + 0.5), p[1] + ny * (tPos + 0.5))) tPos += 0.5;
@@ -2109,14 +2446,19 @@ const LineTracer = (() => {
     const kept = [];
     for (const c of chains) {
       const len = c.geomLength != null ? c.geomLength : c.points.length;
+      // effective width: geometry windows scale with the stroke, but a
+      // degenerately fat measurement (fused blob) is capped against the
+      // drawing's own weight — never against absolute pixels
+      const wEff = o.avgWidth > 0 && c.width != null
+        ? Math.min(c.width, o.avgWidth * 1.5) : (c.width || 2);
       if (c.filled) {
         // filled-shape outline: no pruning — smoothing and fit tolerance
         // scale with the stroke weight, like everything else
         kept.push({
           closed: true, filled: true,
-          points: smoothChain(c.points, true, (c.width || 2) * 0.4),
-          fitTol: Math.max(1.5, Math.min(45, (c.width || 2) * 0.45)) * dMul,
-          width: c.width, geomLength: len
+          points: smoothChain(c.points, true, wEff * 0.4),
+          fitTol: Math.max(1.5, wEff * 0.45) * dMul,
+          width: c.width, fitW: wEff, geomLength: len
         });
         continue;
       }
@@ -2229,7 +2571,7 @@ const LineTracer = (() => {
       // fitted conservatively at length-scaled settings instead.
       const isShort = !c.closed && c.width != null && len < 4 * c.width;
       let eps = o.simplify > 0
-        ? Math.max(o.simplify, Math.min(26, (c.width || 1) * 0.2)) * dMul
+        ? Math.max(o.simplify, wEff * 0.2) * dMul
         : o.simplify;
       if (isShort && eps > 0) eps = Math.max(0.75, Math.min(eps, len / 8));
       let s;
@@ -2237,12 +2579,24 @@ const LineTracer = (() => {
         // smooth the polyline (width-scaled) before fitting, then fit.
         // Reconstructed corner apexes are pinned back to their exact spot —
         // smoothing must not round away corners we deliberately rebuilt.
-        const smoothR = Math.min((c.width || 2) * 0.4, isShort ? len / 6 : 1e9);
-        const pts = smoothChain(c.points, !!c.closed, smoothR);
+        const smoothR = Math.min(wEff * 0.4, isShort ? len / 6 : 1e9);
+        let pinIdx = null;
+        if (c.forced && c.forced.length) {
+          pinIdx = [];
+          for (const f of c.forced) {
+            let bi = -1, bd = 4; // exact members of the polyline (2px slack)
+            for (let i = 0; i < c.points.length; i++) {
+              const d = (c.points[i][0] - f[0]) ** 2 + (c.points[i][1] - f[1]) ** 2;
+              if (d < bd) { bd = d; bi = i; }
+            }
+            if (bi >= 0) pinIdx.push(bi);
+          }
+        }
+        let pts = smoothChain(c.points, !!c.closed, smoothR, pinIdx);
         // smoothing systematically pulls curves INWARD (shrinkage grows with
         // the width-scaled radius, so thick strokes drift visibly off the
         // ink) — re-center every point on the ink midline along its normal
-        if (o.ink && c.width) recenterOnInk(pts, !!c.closed, c.width, o.ink, w, h);
+        if (o.ink && c.width) recenterOnInk(pts, !!c.closed, c.width, o.ink, w, h, c.forced);
         if (c.forced) {
           for (const f of c.forced) {
             let bi = 0, bd = Infinity;
@@ -2253,11 +2607,214 @@ const LineTracer = (() => {
             pts[bi] = [f[0], f[1]];
           }
         }
+        // corner fusion at any angle: find straight RUNS of the polyline;
+        // where two runs meet across a short gap (pool litter, sub-threshold
+        // turns the corner detector ignores), the drawn geometry is two
+        // straight strokes joined at a corner — replace the gap with the
+        // runs' intersection and force ONE anchor there
+        let fitForced = c.forced;
+        if (pts.length > 8) {
+          const latTol = Math.max(1.5, wEff * 0.08);
+          const minRun = Math.max(1.2 * wEff, 30); // bold features run ~1.5x width
+          const nP = pts.length;
+          const devOk = (i, j) => {
+            const A2 = pts[i], B2 = pts[j];
+            const dx = B2[0] - A2[0], dy = B2[1] - A2[1];
+            const L2 = Math.hypot(dx, dy);
+            if (L2 < 1) return true;
+            const st = Math.max(1, (j - i) >> 5);
+            for (let k2 = i + 1; k2 < j; k2 += st) {
+              const d = Math.abs(dy * (pts[k2][0] - A2[0]) - dx * (pts[k2][1] - A2[1])) / L2;
+              if (d > latTol) return false;
+            }
+            return true;
+          };
+          const runs = [];
+          let i2 = 0;
+          while (i2 < nP - 1) {
+            let j2 = i2 + 1, lastGood = -1;
+            while (j2 < nP) {
+              if (devOk(i2, j2)) { lastGood = j2; if (lastGood === nP - 1) break; j2 = Math.min(nP - 1, j2 + 4); }
+              else break;
+            }
+            const runLen = lastGood > i2
+              ? Math.hypot(pts[lastGood][0] - pts[i2][0], pts[lastGood][1] - pts[i2][1]) : 0;
+            if (runLen >= minRun) {
+              // shave arc tails: refit the line on the middle half, then
+              // pull each end in while it strays from that line
+              {
+                const q4 = (lastGood - i2) >> 2;
+                const Am = pts[i2 + q4], Bm = pts[lastGood - q4];
+                const dxm = Bm[0] - Am[0], dym = Bm[1] - Am[1];
+                const Lm = Math.hypot(dxm, dym);
+                if (Lm > 4) {
+                  const tolT = Math.max(1.2, wEff * 0.03);
+                  const devM = i3 => Math.abs(dym * (pts[i3][0] - Am[0]) - dxm * (pts[i3][1] - Am[1])) / Lm;
+                  while (i2 < lastGood - 4 && devM(i2) > tolT) i2++;
+                  while (lastGood > i2 + 4 && devM(lastGood) > tolT) lastGood--;
+                }
+              }
+              // CONFIDENT straights only: long enough to be unambiguous, or
+              // with an alternating (not one-signed) deviation profile — a
+              // shallow arc's chord passes the lateral gate but its sagitta
+              // is one-signed, and treating it as a straight polygonizes arcs
+              const A2 = pts[i2], B2 = pts[lastGood];
+              const dx = B2[0] - A2[0], dy = B2[1] - A2[1];
+              let devSum = 0, devN = 0;
+              const st = Math.max(1, (lastGood - i2) >> 5);
+              for (let k2 = i2 + 1; k2 < lastGood; k2 += st) {
+                devSum += (dy * (pts[k2][0] - A2[0]) - dx * (pts[k2][1] - A2[1])) / runLen;
+                devN++;
+              }
+              // the sign gate applies at EVERY length: long chords of a big
+              // circle pass any lateral gate, and "long enough" is exactly
+              // how arcs polygonize
+              // quantization/pool wobble grows with stroke width — the
+              // one-signed budget scales with BOTH chord and width
+              if (!devN || Math.abs(devSum / devN) <=
+                    Math.max(0.6, 0.015 * runLen, 0.012 * wEff))
+                runs.push([i2, lastGood]);
+              i2 = lastGood;
+            } else i2++;
+          }
+          if (runs.length > 1 || (c.closed && runs.length === 1)) {
+            const maxGap = 1.6 * wEff;
+            fitForced = (c.forced || []).slice();
+            const nearForced = (p, r) =>
+              fitForced.some(f => (f[0] - p[0]) ** 2 + (f[1] - p[1]) ** 2 < r * r);
+            // a straight run's endpoints are real anchors — but only where
+            // the geometry genuinely turns away. A pool interruption or a
+            // rebuilt jump CONTINUES the same line; anchoring there sprays
+            // anchors mid-straight
+            const FORCE_RUN_ENDPOINTS = false; // corpus-hostile: fitter owns straights
+            const lineDev = (R, p) => {
+              const A3 = pts[R[0]], B3 = pts[R[1]];
+              const dx = B3[0] - A3[0], dy = B3[1] - A3[1];
+              const L3 = Math.hypot(dx, dy) || 1;
+              return Math.abs(dy * (p[0] - A3[0]) - dx * (p[1] - A3[1])) / L3;
+            };
+            const probePt = (from, step) => {
+              const target = 0.8 * wEff;
+              let acc = 0, k2 = from, guard2 = nP;
+              while (guard2-- > 0) {
+                let nx2 = k2 + step;
+                if (nx2 < 0 || nx2 >= nP) {
+                  if (!c.closed) return null;
+                  nx2 = ((nx2 % nP) + nP) % nP;
+                }
+                const segL = Math.hypot(pts[nx2][0] - pts[k2][0], pts[nx2][1] - pts[k2][1]);
+                if (acc + segL >= target) {
+                  const f2 = segL > 0 ? (target - acc) / segL : 0;
+                  return [pts[k2][0] + (pts[nx2][0] - pts[k2][0]) * f2,
+                          pts[k2][1] + (pts[nx2][1] - pts[k2][1]) * f2];
+                }
+                acc += segL;
+                k2 = nx2;
+              }
+              return null;
+            };
+            const devLim = Math.max(3, 0.15 * wEff);
+            for (const R of (FORCE_RUN_ENDPOINTS ? runs : [])) {
+              const pb = probePt(R[0], -1);
+              if (pb && lineDev(R, pb) > devLim &&
+                  !nearForced(pts[R[0]], wEff * 0.5)) fitForced.push(pts[R[0]]);
+              const pf = probePt(R[1], 1);
+              if (pf && lineDev(R, pf) > devLim &&
+                  !nearForced(pts[R[1]], wEff * 0.5)) fitForced.push(pts[R[1]]);
+            }
+            const inject = []; // {at: index after which X goes, upto: resume index, X}
+            const pairs2 = [];
+            for (let m2 = 0; m2 + 1 < runs.length; m2++) pairs2.push([runs[m2], runs[m2 + 1], false]);
+            if (c.closed && runs.length > 1) pairs2.push([runs[runs.length - 1], runs[0], true]);
+            if (c.closed && runs.length === 1) pairs2.push([runs[0], runs[0], true]);
+            for (const [R1, R2, wrap] of pairs2) {
+              const e1 = R1[1], s2 = wrap ? R2[0] + nP : R2[0];
+              const gapArc = (() => {
+                let g = 0;
+                for (let k2 = e1; k2 < s2; k2++) {
+                  const a2 = pts[k2 % nP], b2 = pts[(k2 + 1) % nP];
+                  g += Math.hypot(b2[0] - a2[0], b2[1] - a2[1]);
+                }
+                return g;
+              })();
+              if (gapArc > maxGap) continue;
+              const p1 = pts[R1[0]], q1 = pts[e1];
+              const p2j = pts[R2[0]], q2 = pts[R2[1]];
+              let u1x = q1[0] - p1[0], u1y = q1[1] - p1[1];
+              let u2x = q2[0] - p2j[0], u2y = q2[1] - p2j[1];
+              const l1 = Math.hypot(u1x, u1y) || 1, l2 = Math.hypot(u2x, u2y) || 1;
+              u1x /= l1; u1y /= l1; u2x /= l2; u2y /= l2;
+              const cosT = u1x * u2x + u1y * u2y;
+              if (cosT > 0.978 || cosT < -0.26) continue; // 12°..105° turns only
+              const det = u1x * u2y - u1y * u2x;
+              if (Math.abs(det) < 0.2) continue;
+              const dx = p2j[0] - q1[0], dy = p2j[1] - q1[1];
+              const t = (dx * u2y - dy * u2x) / det;
+              const X = [q1[0] + t * u1x, q1[1] + t * u1y];
+              if (Math.hypot(X[0] - q1[0], X[1] - q1[1]) > 2 * wEff ||
+                  Math.hypot(X[0] - p2j[0], X[1] - p2j[1]) > 2 * wEff) continue;
+              // a fuse pivot near X is the SAME corner estimated more
+              // crudely (probe-slid); X, the intersection of two measured
+              // lines, replaces it. An exact match is a duplicate to skip.
+              let reloIdx = -1, isDup = false;
+              for (let fi = 0; fi < fitForced.length; fi++) {
+                const dF = Math.hypot(fitForced[fi][0] - X[0], fitForced[fi][1] - X[1]);
+                if (dF < 2) { isDup = true; break; }
+                if (dF < wEff * 0.6 && reloIdx < 0) reloIdx = fi;
+              }
+              if (isDup) continue;
+              let stray = 0, vouched = false;
+              for (let k2 = e1 + 1; k2 < s2; k2++) {
+                const p2 = pts[k2 % nP];
+                const d1a = Math.abs(u1y * (p2[0] - q1[0]) - u1x * (p2[1] - q1[1]));
+                const d2a = Math.abs(u2y * (p2[0] - p2j[0]) - u2x * (p2[1] - p2j[1]));
+                if (Math.min(d1a, d2a) > wEff * 0.28) stray++;
+                if (nearForced(p2, wEff * 0.4)) vouched = true;
+              }
+              if (!stray && !vouched) continue;
+              if (reloIdx >= 0) fitForced[reloIdx] = X;
+              inject.push({ e1, s2: s2 % nP, X, wrap });
+              // the far ends of the fused corner's straight legs keep their
+              // anchors — but only where geometry genuinely turns away
+              // (mid-straight anchors fragment straights and break grammar)
+              for (const [R2b, ei] of [[R1, R1[0]], [R2, R2[1]]]) {
+                const pb = probePt(ei, ei === R2b[0] ? -1 : 1);
+                if (pb && lineDev(R2b, pb) > Math.max(3, 0.15 * wEff) &&
+                    !nearForced(pts[ei], wEff * 0.5)) fitForced.push(pts[ei]);
+              }
+            }
+            if (inject.length) {
+              // apply injections on a rotated copy so a seam-crossing gap
+              // becomes an ordinary linear one
+              const wrapInj = inject.find(ij => ij.wrap) || null;
+              const rot = wrapInj ? wrapInj.s2 % nP : 0;
+              const rpts = rot ? pts.slice(rot).concat(pts.slice(0, rot)) : pts.slice();
+              const mapI = i => ((i - rot) % nP + nP) % nP;
+              const linear = inject.map(ij => ({
+                e1: mapI(ij.e1), s2: mapI(ij.s2 % nP), X: ij.X
+              })).filter(ij => ij.e1 < ij.s2 || ij.s2 === 0)
+                .sort((a2, b2) => a2.e1 - b2.e1);
+              let out = [];
+              let base = 0;
+              for (const ij of linear) {
+                const stop = ij.s2 === 0 ? nP : ij.s2; // seam gap resumes at 0
+                if (ij.e1 < base) continue;             // overlapping: keep first
+                out = out.concat(rpts.slice(base, ij.e1 + 1), [ij.X]);
+                if (!fitForced.some(f => Math.hypot(f[0] - ij.X[0], f[1] - ij.X[1]) < 2))
+                  fitForced.push(ij.X);
+                base = stop;
+              }
+              out = out.concat(rpts.slice(base));
+              pts = out;
+            }
+          }
+        }
         s = {
           closed: c.closed,
           points: pts,
           fitTol: Math.max(0.75, eps),
-          forcedPts: c.forced
+          fitW: wEff,
+          forcedPts: fitForced
         };
       } else {
         s = simplifyChain(c, eps);
@@ -2292,6 +2849,10 @@ const LineTracer = (() => {
       const corners = [];
       const inkCtx = o.ink ? { ink: o.ink, w, h } : null;
       const d = lines.map(c => chainToPathData(c, o.smooth, c.fitTol, corners, inkCtx)).join(' ');
+      // per-end cap classification, one entry per subpath in d's order
+      // (r=round, b=butt, x=unknown, z=closed) — machine-readable finishing
+      const capStr = lines.map(c => c.closed ? 'z:z'
+        : ((c.caps && c.caps[0] || 'x')[0]) + ':' + ((c.caps && c.caps[1] || 'x')[0])).join(' ');
       let rc = 0, bc = 0;
       for (const c of chainList) if (c.caps)
         for (const cap of c.caps) {
@@ -2352,6 +2913,7 @@ const LineTracer = (() => {
       }
       return {
         d,
+        capStr,
         dotD: dots.map(c => chainToPathData(c, o.smooth, c.fitTol)).join(' '),
         width: outWidth,
         cap: bc > rc ? 'butt' : 'round',
@@ -2383,7 +2945,7 @@ const LineTracer = (() => {
       const sw = fmt(Math.max(0.05, p.width * toViewBox));
       let out = '';
       if (p.d) out += `<path d="${p.d}" fill="none" stroke="${o.stroke}" stroke-width="${sw}" ` +
-        `stroke-linecap="${p.cap}" stroke-linejoin="${p.join}"/>`;
+        `stroke-linecap="${p.cap}" stroke-linejoin="${p.join}" data-caps="${p.capStr || ''}"/>`;
       // dots need round caps to render, whatever the class voted
       if (p.dotD) out += `<path d="${p.dotD}" fill="none" stroke="${o.stroke}" stroke-width="${sw}" ` +
         `stroke-linecap="round" stroke-linejoin="round"/>`;
@@ -2732,6 +3294,97 @@ const LineTracer = (() => {
       }
     }
 
+    // Intra-cap medial-axis debris: thick flat (butt) caps grow skeleton
+    // branches INSIDE the cap disc; at bold widths they survive as tiny
+    // chains that bend the parent's end during merging. A chain that fits
+    // entirely inside another chain's end-cap disc is cap debris.
+    {
+      const ends2 = [];
+      for (const c of chains) {
+        if (c.closed || c.points.length < 2 || !c.endDeg) continue;
+        for (const e of [0, 1])
+          if (c.endDeg[e] <= 1)
+            ends2.push({ p: e === 0 ? c.points[0] : c.points[c.points.length - 1],
+                         w: c.width || 2, c });
+      }
+      let fbDeleted = 0;
+      // face-branch removal: a flat (butt) face of a THICK stroke grows the
+      // face's own medial branch, so the stroke's end junction is populated
+      // ONLY by short free-tailed slivers (the branch halves). Delete them.
+      // A real junction always holds at least one other substantial arm —
+      // including the corner-tip spurs the merge machinery needs.
+      {
+        const del = new Set();
+        for (const c of chains) {
+          if (c.closed || c.points.length < 2 || !c.endDeg) continue;
+          const cw = c.width || 2;
+          if ((c.geomLength || c.points.length) < cw * 2) continue;
+          for (const e of [0, 1]) {
+            if (c.endDeg[e] < 3) continue;
+            const pE = e === 0 ? c.points[0] : c.points[c.points.length - 1];
+            const rr = Math.max(6, cw * 0.6);
+            const near = [];
+            let real = false;
+            for (const o of chains) {
+              if (o === c || o.closed) continue;
+              let touches = false;
+              for (const oe of [0, 1]) {
+                const p2 = oe === 0 ? o.points[0] : o.points[o.points.length - 1];
+                if (Math.hypot(p2[0] - pE[0], p2[1] - pE[1]) < rr) { touches = true; break; }
+              }
+              if (!touches) continue;
+              const oLen = o.geomLength || o.points.length;
+              const oFree = o.endDeg && (o.endDeg[0] <= 1 || o.endDeg[1] <= 1);
+              if (oLen < cw * 1.6 && oFree) near.push(o);
+              else real = true;
+            }
+            if (!real && near.length)
+              for (const o of near) del.add(o);
+          }
+        }
+        if (del.size) { chains = chains.filter(c => !del.has(c)); fbDeleted = del.size; }
+      }
+      const keep = [];
+      for (const c of chains) {
+        const len = c.geomLength || c.points.length;
+        let debris = false;
+        if (!c.closed && len < (c.width || 2) * 1.6) {
+          for (const E of ends2) {
+            if (E.c === c) continue;
+            if (len > E.w * 1.4) continue;
+            const rr = E.w * 0.8;
+            let inside = true;
+            for (const p of c.points)
+              if (Math.hypot(p[0] - E.p[0], p[1] - E.p[1]) > rr) { inside = false; break; }
+            if (inside) { debris = true; break; }
+          }
+        }
+        if (!debris) keep.push(c);
+      }
+      const dropped = chains.length - keep.length + fbDeleted;
+      chains = keep;
+      if (dropped) {
+        for (const c of chains) {
+          if (c.closed || !c.endDeg) continue;
+          for (const e of [0, 1]) {
+            if (c.endDeg[e] <= 1) continue;
+            const tr = c.trim && c.trim[e];
+            const p = tr ? tr.p : (e === 0 ? c.points[0] : c.points[c.points.length - 1]);
+            const rr = Math.max(6, (tr ? tr.r : (c.width || 2) * 0.5) * 1.2);
+            let occupied = false;
+            for (const o of chains) {
+              if (o === c) continue;
+              const pts = o.points;
+              for (let k = 0; k < pts.length && !occupied; k += 4)
+                if (Math.hypot(pts[k][0] - p[0], pts[k][1] - p[1]) < rr) occupied = true;
+              if (occupied) break;
+            }
+            if (!occupied) { c.endDeg[e] = 1; if (c.trim) c.trim[e] = null; }
+          }
+        }
+      }
+    }
+
     // Trim chain ends back out of junction blobs: where strokes cross, the
     // ink is locally much wider and the skeleton wanders, bending every
     // line entering the junction. Each trimmed end remembers the junction
@@ -2786,9 +3439,10 @@ const LineTracer = (() => {
       let cx = 0, cy = 0;
       for (const p of c.points) { cx += p[0]; cy += p[1]; }
       cx /= c.points.length; cy /= c.points.length;
+      const rayMax = Math.max(80, 3 * (c.width || 2));
       const ray = (dx, dy) => {
         let r = 0;
-        while (r < 80) {
+        while (r < rayMax) {
           const x = Math.round(cx + dx * (r + 1) - 0.5), y = Math.round(cy + dy * (r + 1) - 0.5);
           if (x < 0 || y < 0 || x >= img.width || y >= img.height || !bin[y * img.width + x]) break;
           r++;
@@ -2850,13 +3504,65 @@ const LineTracer = (() => {
             w: c.width || 1
           });
     }
+    const capInkAt = (x, y) => {
+      const xi = Math.round(x - 0.5), yi = Math.round(y - 0.5);
+      return xi >= 0 && yi >= 0 && xi < img.width && yi < img.height &&
+             bin[yi * img.width + xi] === 1;
+    };
+    // two ends form an (unjoined) corner only when the joint between them is
+    // still INKED — parallel neighbor strokes at bold widths come near each
+    // other across plain background and must keep their own cap evidence
+    const jointBetween = (p, q) => {
+      const Lj = Math.hypot(q[0] - p[0], q[1] - p[1]);
+      const nj = Math.max(2, Math.ceil(Lj / 3));
+      let holes = 0;
+      for (let i = 1; i < nj; i++)
+        if (!capInkAt(p[0] + (q[0] - p[0]) * i / nj, p[1] + (q[1] - p[1]) * i / nj)) holes++;
+      return holes <= Math.max(2, nj * 0.12);
+    };
     for (const c of chains) {
       if (c.closed || c.points.length < 3 || !c.endDeg) continue;
       c.caps = [null, null];
-      // strokes shorter than ~4x their width: end tangents are too noisy to
-      // probe reliably, and a wrong flat-face extension visibly deforms the
-      // whole mark — keep the provable minimum (round caps)
-      if ((c.geomLength || c.points.length) < 4 * (c.width || 1)) {
+      // strokes shorter than ~1.5x their width: no room to measure a
+      // terminal tangent at all — keep the provable minimum (round caps).
+      // Longer short strokes ARE probed: with width-windowed terminal
+      // tangents the flat-face probe is reliable, and butt ends must be
+      // reproduced at any weight (anchor at the ink face)
+      // cap hygiene FIRST: at thick flat ends the skeleton grows a branch
+      // ALONG the face (the face's own medial axis) that tapers into a
+      // corner. Branch points sit CLOSER to background than the true
+      // centerline's ~w/2 — trim the end while the local ink radius is
+      // below it ("trim ~w/2 from the face"); the march below restores the
+      // lost reach by extending to the ink face. Round-cap ends stop at
+      // full radius, so they lose at most a pixel or two.
+      const lenPreTrim = c.geomLength || c.points.length;
+      const trimStash = [null, null];
+      for (const e of [0, 1]) {
+        if (lenPreTrim < 1.5 * (c.width || 1)) break; // dots/stubs: no face
+        if ((c.width || 2) < 8) break; // sub-face-scale: nothing to trim
+        if (c.endDeg[e] > 1) continue;
+        const n0 = c.points.length;
+        const wh0 = (c.width || 2) / 2;
+        // preserve a measurable middle: short strokes (~2w) would lose
+        // everything to two 1.2w end-trims; the walk re-extends butt ends
+        const maxCut0 = Math.min(Math.round((c.width || 2) * 1.2),
+          Math.max(0, Math.round((n0 - Math.max(12, (c.width || 2) * 0.4)) / 2)));
+        let cut0 = 0;
+        while (cut0 < maxCut0) {
+          const p2 = c.points[e === 0 ? cut0 : n0 - 1 - cut0];
+          const xi2 = Math.round(p2[0] - 0.5), yi2 = Math.round(p2[1] - 0.5);
+          const r2 = xi2 >= 0 && yi2 >= 0 && xi2 < img.width && yi2 < img.height
+            ? dist[yi2 * img.width + xi2] / 3 : 0;
+          if (r2 >= wh0 * 0.88) break;
+          cut0++;
+        }
+        if (cut0 > 0 && n0 - cut0 >= 4) {
+          trimStash[e] = e === 0 ? c.points.slice(0, cut0) : c.points.slice(n0 - cut0);
+          c.points = e === 0 ? c.points.slice(cut0) : c.points.slice(0, n0 - cut0);
+          if (c.geomLength) c.geomLength = Math.max(1, c.geomLength - cut0);
+        }
+      }
+      if (lenPreTrim < 1.5 * (c.width || 1)) {
         for (const e of [0, 1]) if (c.endDeg[e] <= 1) c.caps[e] = 'round';
         continue;
       }
@@ -2869,41 +3575,167 @@ const LineTracer = (() => {
           const pe = e === 0 ? c.points[0] : c.points[c.points.length - 1];
           const nearOther = freeEnds.some(o =>
             o.c !== c &&
-            Math.hypot(o.p[0] - pe[0], o.p[1] - pe[1]) < ((c.width || 1) + o.w) * 1.4);
+            Math.hypot(o.p[0] - pe[0], o.p[1] - pe[1]) < ((c.width || 1) + o.w) * 1.4 &&
+            jointBetween(pe, o.p));
           if (nearOther) { c.caps[e] = 'round'; continue; }
         }
         const n = c.points.length;
         const pEnd = e === 0 ? c.points[0] : c.points[n - 1];
-        const k = Math.min(6, n - 1);
-        const pIn = e === 0 ? c.points[k] : c.points[n - 1 - k];
-        let tx = pEnd[0] - pIn[0], ty = pEnd[1] - pIn[1];
-        const tl = Math.hypot(tx, ty) || 1;
-        tx /= tl; ty /= tl;
         const wHalf = (c.width || 2) / 2;
         const inkAt = (x, y) => {
           const xi = Math.round(x - 0.5), yi = Math.round(y - 0.5);
           return xi >= 0 && yi >= 0 && xi < img.width && yi < img.height &&
                  bin[yi * img.width + xi] === 1;
         };
-        let L = 0;
+        // The medial axis bends to meet a flat face PERPENDICULARLY, so no
+        // local tangent near the end can aim the probe. Fit a circle to the
+        // trimmed remnant and walk ALONG it: the walk re-creates the arc the
+        // trim removed, finds the face on-curve, and a flat face shows a
+        // still-full cross-section at the stop while a round cap tapers.
+        const span = Math.min(n - 1, Math.max(8, Math.round((c.width || 2) * 2.5)));
+        const P1 = c.points[e === 0 ? 0 : n - 1];
+        const P3 = c.points[e === 0 ? span : n - 1 - span];
+        // least-squares (Kasa) circle over the end span — a 3-point
+        // circumcircle is far too jittery on short trimmed remnants
+        let cx0 = 0, cy0 = 0, R0 = Infinity;
+        {
+          const m2 = Math.max(8, Math.min(40, span));
+          let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0, sz = 0, cnt = 0;
+          for (let k2 = 0; k2 <= m2; k2++) {
+            const idx2 = e === 0 ? Math.round(span * k2 / m2) : n - 1 - Math.round(span * k2 / m2);
+            const p2 = c.points[idx2];
+            const z2 = p2[0] * p2[0] + p2[1] * p2[1];
+            sx += p2[0]; sy += p2[1]; sxx += p2[0] * p2[0]; syy += p2[1] * p2[1];
+            sxy += p2[0] * p2[1]; sxz += p2[0] * z2; syz += p2[1] * z2; sz += z2; cnt++;
+          }
+          const A11 = sxx - sx * sx / cnt, A12 = sxy - sx * sy / cnt, A22 = syy - sy * sy / cnt;
+          const B1 = (sxz - sx * sz / cnt) / 2, B2 = (syz - sy * sz / cnt) / 2;
+          const det2 = A11 * A22 - A12 * A12;
+          if (Math.abs(det2) > 1e-3) {
+            cx0 = (B1 * A22 - B2 * A12) / det2;
+            cy0 = (B2 * A11 - B1 * A12) / det2;
+            R0 = Math.hypot(P1[0] - cx0, P1[1] - cy0);
+            // VALIDATE: near-collinear data at pixel magnitudes slips past
+            // any raw determinant gate and yields a garbage small circle —
+            // a straight stroke must not ride the arc walk
+            let resid = 0;
+            for (let k2 = 0; k2 <= 4; k2++) {
+              const idx2 = e === 0 ? Math.round(span * k2 / 4) : n - 1 - Math.round(span * k2 / 4);
+              const p2 = c.points[idx2];
+              resid = Math.max(resid, Math.abs(Math.hypot(p2[0] - cx0, p2[1] - cy0) - R0));
+            }
+            if (resid > Math.max(1.5, R0 * 0.04)) R0 = Infinity;
+          }
+        }
+        // does the end region actually bend? an unfittable STRAIGHT end
+        // belongs to the probe; an unfittable bent one still needs the walk
+        // (chord steps), or it loses its face entirely
+        let bentEnd = false;
+        {
+          const iM2 = e === 0 ? span >> 1 : n - 1 - (span >> 1);
+          const Pm = c.points[iM2];
+          const d1x = Pm[0] - P1[0], d1y = Pm[1] - P1[1];
+          const d2x = P3[0] - Pm[0], d2y = P3[1] - Pm[1];
+          const l12 = (Math.hypot(d1x, d1y) || 1) * (Math.hypot(d2x, d2y) || 1);
+          bentEnd = (d1x * d2x + d1y * d2y) / l12 < 0.99; // ~8 degrees
+        }
+        const straight2 = !(R0 < (c.width || 2) * 40 && R0 > (c.width || 2) * 0.6);
+        // outward unit step at a point (circle tangent, or the chord dir)
+        let chx = P1[0] - P3[0], chy = P1[1] - P3[1];
+        const chl = Math.hypot(chx, chy) || 1;
+        chx /= chl; chy /= chl;
+        const stepAt = (x, y) => {
+          if (straight2) return [chx, chy];
+          let rx = x - cx0, ry = y - cy0;
+          const rl = Math.hypot(rx, ry) || 1;
+          let tx2 = -ry / rl, ty2 = rx / rl;
+          if (tx2 * chx + ty2 * chy < 0) { tx2 = -tx2; ty2 = -ty2; }
+          return [tx2, ty2];
+        };
+        // tiny strokes have no face to analyze (the whole cap zone is a
+        // few quantized pixels): the provable minimum is a round cap
+        if ((c.width || 2) < 8) { c.caps[e] = 'round'; continue; }
+        // CLASSIFICATION: the classic probe, from the hygiene-trimmed end
+        // with a LOCAL terminal tangent. (With the face-branch curl trimmed
+        // away, the probe's aim is sound at every weight; every fancier
+        // discriminator — taper, face width, boundary fit, area profile —
+        // drowns in AA noise or oblique-approach ambiguity.)
+        const kT = Math.max(1, Math.min(Math.max(6, Math.round((c.width || 2) * 0.15)),
+          Math.floor((n - 1) / 3) || 1));
+        const pInT = e === 0 ? c.points[kT] : c.points[n - 1 - kT];
+        let tx = pEnd[0] - pInT[0], ty = pEnd[1] - pInT[1];
+        const tl = Math.hypot(tx, ty) || 1;
+        tx /= tl; ty /= tl;
         const maxL = Math.ceil(wHalf * 2 + 4);
-        while (L < maxL && inkAt(pEnd[0] + tx * (L + 1), pEnd[1] + ty * (L + 1))) L++;
-        if (L < Math.max(2, wHalf * 0.4)) { c.caps[e] = 'butt'; continue; }
-        const d = L * 0.75, off = wHalf * 0.8;
-        const flat = inkAt(pEnd[0] + tx * d - ty * off, pEnd[1] + ty * d + tx * off) &&
-                     inkAt(pEnd[0] + tx * d + ty * off, pEnd[1] + ty * d - tx * off);
-        // the "face" must belong to THIS stroke: ink clearly wider than the
-        // stroke out there means the probe entered a neighboring stroke or
-        // joint — extending would leave an overshoot nub with its own cap
-        const wide = inkAt(pEnd[0] + tx * d - ty * wHalf * 1.7, pEnd[1] + ty * d + tx * wHalf * 1.7) ||
-                     inkAt(pEnd[0] + tx * d + ty * wHalf * 1.7, pEnd[1] + ty * d - tx * wHalf * 1.7);
-        if (flat && !wide) {
+        let L = 0;
+        for (const off of ((c.width || 2) < 14 ? [0] : [0, wHalf * 0.5, -wHalf * 0.5])) {
+          const ox2 = pEnd[0] - ty * off, oy2 = pEnd[1] + tx * off;
+          let Lr = 0;
+          while (Lr < maxL && inkAt(ox2 + tx * (Lr + 1), oy2 + ty * (Lr + 1))) Lr++;
+          if (Lr > L) L = Lr;
+        }
+        let isButt = false;
+        if (L < Math.max(2, wHalf * 0.4)) isButt = true;
+        else {
+          const d = L * 0.75;
+          // per-side probe pairs: an arc's curvature rotates the face, so a
+          // curved butt end hits BOTH probes on the arc's inner side and
+          // misses the outer — while a round cap only ever hits the two
+          // NEAR probes, one per side, never a full same-side pair
+          const hA1 = inkAt(pEnd[0] - ty * wHalf * 0.5 + tx * d, pEnd[1] + tx * wHalf * 0.5 + ty * d);
+          const hA2 = inkAt(pEnd[0] - ty * wHalf * 0.8 + tx * d, pEnd[1] + tx * wHalf * 0.8 + ty * d);
+          const hB1 = inkAt(pEnd[0] + ty * wHalf * 0.5 + tx * d, pEnd[1] - tx * wHalf * 0.5 + ty * d);
+          const hB2 = inkAt(pEnd[0] + ty * wHalf * 0.8 + tx * d, pEnd[1] - tx * wHalf * 0.8 + ty * d);
+          const flatHits = (hA1 ? 1 : 0) + (hA2 ? 1 : 0) + (hB1 ? 1 : 0) + (hB2 ? 1 : 0);
+          const wide = inkAt(pEnd[0] + tx * d - ty * wHalf * 1.7, pEnd[1] + ty * d + tx * wHalf * 1.7) &&
+                       inkAt(pEnd[0] + tx * d + ty * wHalf * 1.7, pEnd[1] + ty * d - tx * wHalf * 1.7);
+          isButt = (flatHits >= 3 || (hA1 && hA2) || (hB1 && hB2)) && !wide;
+        }
+        if (!isButt) {
+          c.caps[e] = 'round';
+          if (trimStash[e]) {
+            // the trim was collateral: a round end's skeleton was fine
+            c.points = e === 0 ? trimStash[e].concat(c.points) : c.points.concat(trimStash[e]);
+            if (c.geomLength) c.geomLength += trimStash[e].length;
+          }
+          continue;
+        }
+        // EXTENSION GEOMETRY: a bent end extends along its own fitted
+        // circle to the face (a straight extension chords the arc and
+        // kinks the fit); a straight end extends along the tangent
+        if (bentEnd && R0 < (c.width || 2) * 40) {
+          let qx = pEnd[0], qy = pEnd[1];
+          let walked = 0, joint = false;
+          let secMax = 0;
+          const maxWalk = wHalf * 2.2 + 6;
+          const capS = wHalf * 1.4;
+          const added = [];
+          while (walked < maxWalk) {
+            const st = stepAt(qx, qy);
+            const nx3 = qx + st[0] * 2, ny3 = qy + st[1] * 2;
+            let sPos = 0, sNeg = 0;
+            while (sPos < capS && inkAt(nx3 - st[1] * (sPos + 1), ny3 + st[0] * (sPos + 1))) sPos += 1;
+            while (sNeg < capS && inkAt(nx3 + st[1] * (sNeg + 1), ny3 - st[0] * (sNeg + 1))) sNeg += 1;
+            const sec = sPos + sNeg + (inkAt(nx3, ny3) ? 1 : 0);
+            if (sPos >= capS && sNeg >= capS) { joint = true; break; }
+            if (sec > secMax) secMax = sec;
+            if (sec < secMax * 0.5 || sec < 2) break;
+            qx = nx3; qy = ny3; walked += 2;
+            added.push([qx, qy]);
+          }
+          if (!joint && walked >= 2 && walked < maxWalk) {
+            if (e === 0) c.points.unshift(...added.slice().reverse());
+            else c.points.push(...added);
+            if (c.geomLength) c.geomLength += walked;
+            c.caps[e] = 'butt';
+          } else {
+            c.caps[e] = 'round';
+          }
+        } else {
           const q = [pEnd[0] + tx * Math.max(0, L - 1), pEnd[1] + ty * Math.max(0, L - 1)];
           if (e === 0) c.points.unshift(q);
           else c.points.push(q);
           c.caps[e] = 'butt';
-        } else {
-          c.caps[e] = 'round';
         }
       }
     }
