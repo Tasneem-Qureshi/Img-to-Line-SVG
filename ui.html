@@ -1802,25 +1802,12 @@ const LineTracer = (() => {
         const gate = Math.max(1.5, Math.min(tol * 0.9,
           oneSigned ? chord * 0.04 : Math.max(SW * 0.12, chord * 0.04)));
         if (maxD <= gate) {
-          let a = p0.slice(), b = p1.slice();
-          // snap almost-horizontal/vertical ruler lines exactly straight
-          if (Math.abs(b[1] - a[1]) <= Math.max(2, chord * 0.012)) {
-            a[1] = b[1] = (a[1] + b[1]) / 2;
-          } else if (Math.abs(b[0] - a[0]) <= Math.max(2, chord * 0.012)) {
-            a[0] = b[0] = (a[0] + b[0]) / 2;
-          } else if (chord > 14) {
-            // icon rule: diagonals sit at 45° — snap within ~3.5°
-            const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
-            const target = Math.round(ang / (Math.PI / 4)) * (Math.PI / 4);
-            const diagonal = Math.abs(Math.abs(target) - Math.PI / 4) < 1e-6 ||
-                             Math.abs(Math.abs(target) - 3 * Math.PI / 4) < 1e-6;
-            if (diagonal && Math.abs(ang - target) < 0.062) {
-              const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2, half = chord / 2;
-              a = [mx - Math.cos(target) * half, my - Math.sin(target) * half];
-              b = [mx + Math.cos(target) * half, my + Math.sin(target) * half];
-            }
-          }
-          segs.push({ line: [a, b] });
+          // axis/45° snapping happens in axisSnapSegLines AFTER cleanup:
+          // snapping here mutates the span's endpoints while the NEIGHBOR
+          // segments still end at the forced corner anchors, leaving a
+          // width-scale seam at every snapped joint (rendered as a leaning
+          // bar or a duplicate anchor a hair off the corner)
+          segs.push({ line: [p0.slice(), p1.slice()] });
           return;
         }
       }
@@ -2227,7 +2214,52 @@ const LineTracer = (() => {
     }
     // corners (detected or rebuilt) and extreme anchors survive cleanup
     const protectedPts = (forcedPts || []).concat(corners.map(ci => pts[ci]), extremePts);
-    return cleanupSegs(segs, tol, SW, closed, protectedPts);
+    return axisSnapSegLines(cleanupSegs(segs, tol, SW, closed, protectedPts));
+  }
+
+  // Post-cleanup axis snap: a near-vertical/horizontal LINE segment snaps
+  // exactly straight, and its endpoints' other occurrences (the corner
+  // anchors it shares with neighboring segments) move WITH it. The in-fit
+  // snap can't do this — corner anchors are forced points that survive it,
+  // which used to leave a leaning bar or a duplicate anchor 0.1u off the
+  // snapped seam.
+  function axisSnapSegLines(segs) {
+    const movePt = (fx, fy, tx2, ty2) => {
+      for (const s of segs) {
+        const cand = s.line ? s.line : [s[0], s[3]];
+        for (const p of cand)
+          if ((p[0] - fx) ** 2 + (p[1] - fy) ** 2 < 1) { p[0] = tx2; p[1] = ty2; }
+      }
+    };
+    for (const s of segs) {
+      if (!s.line) continue;
+      const [a, b] = s.line;
+      const chord = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (chord < 14) continue;
+      const gate = Math.max(2, chord * 0.012);
+      const dx2 = Math.abs(b[0] - a[0]), dy2 = Math.abs(b[1] - a[1]);
+      if (dx2 > 1e-9 && dx2 <= gate && dy2 > dx2) {
+        const mx = (a[0] + b[0]) / 2, ay = a[1], by = b[1];
+        movePt(a[0], a[1], mx, ay); movePt(b[0], b[1], mx, by);
+      } else if (dy2 > 1e-9 && dy2 <= gate && dx2 > dy2) {
+        const my = (a[1] + b[1]) / 2, ax = a[0], bx = b[0];
+        movePt(a[0], a[1], ax, my); movePt(b[0], b[1], bx, my);
+      } else {
+        // icon rule: diagonals sit at 45° — snap within ~3.5°, rotating the
+        // segment about its midpoint and carrying the shared anchors along
+        const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+        const target = Math.round(ang / (Math.PI / 4)) * (Math.PI / 4);
+        const diagonal = Math.abs(Math.abs(target) - Math.PI / 4) < 1e-6 ||
+                         Math.abs(Math.abs(target) - 3 * Math.PI / 4) < 1e-6;
+        if (diagonal && Math.abs(ang - target) < 0.062) {
+          const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2, half = chord / 2;
+          const na = [mx - Math.cos(target) * half, my - Math.sin(target) * half];
+          const nb = [mx + Math.cos(target) * half, my + Math.sin(target) * half];
+          movePt(a[0], a[1], na[0], na[1]); movePt(b[0], b[1], nb[0], nb[1]);
+        }
+      }
+    }
+    return segs;
   }
 
   // path data; single points render as dots, smooth chains as fitted curves
@@ -2737,20 +2769,127 @@ const LineTracer = (() => {
                 }
                 return g;
               })();
-              if (gapArc > maxGap) continue;
-              const p1 = pts[R1[0]], q1 = pts[e1];
-              const p2j = pts[R2[0]], q2 = pts[R2[1]];
-              let u1x = q1[0] - p1[0], u1y = q1[1] - p1[1];
-              let u2x = q2[0] - p2j[0], u2y = q2[1] - p2j[1];
+              if (gapArc > maxGap * 2) continue;
+              const q1 = pts[e1], p2j = pts[R2[0]];
+              // run directions from the middle half of each run: near the
+              // corner a run's last points sag (smoothing pullback), and a
+              // chord through the sagged end tilts the measured line — the
+              // intersection then lands 0.5-0.8u past the true corner at
+              // bold widths (the "pivot past the joint" defect). Short runs
+              // (a handful of points) keep the plain endpoint chord.
+              const h1 = (e1 - R1[0]) >= 8 ? (e1 - R1[0]) >> 2 : 0;
+              const h2 = (R2[1] - R2[0]) >= 8 ? (R2[1] - R2[0]) >> 2 : 0;
+              const A1 = pts[R1[0] + h1], B1 = pts[e1 - h1];
+              const A2m = pts[R2[0] + h2], B2m = pts[R2[1] - h2];
+              let u1x = B1[0] - A1[0], u1y = B1[1] - A1[1];
+              let u2x = B2m[0] - A2m[0], u2y = B2m[1] - A2m[1];
               const l1 = Math.hypot(u1x, u1y) || 1, l2 = Math.hypot(u2x, u2y) || 1;
               u1x /= l1; u1y /= l1; u2x /= l2; u2y /= l2;
               const cosT = u1x * u2x + u1y * u2y;
               if (cosT > 0.978 || cosT < -0.26) continue; // 12°..105° turns only
               const det = u1x * u2y - u1y * u2x;
               if (Math.abs(det) < 0.2) continue;
-              const dx = p2j[0] - q1[0], dy = p2j[1] - q1[1];
+              const dx = A2m[0] - B1[0], dy = A2m[1] - B1[1];
               const t = (dx * u2y - dy * u2x) / det;
-              const X = [q1[0] + t * u1x, q1[1] + t * u1y];
+              const X = [B1[0] + t * u1x, B1[1] + t * u1y];
+              // rounded-corner veto: maxGap scales with stroke width, and at
+              // bold weights it grows past the icon's own corner radii — a
+              // whole AUTHORED rounded corner then qualifies as a "gap" and
+              // gets fused into a fake sharp intersection off the ink. The
+              // gap shape alone can't decide (thinning retracts SHARP corners
+              // into ~0.5-0.7w arcs too), so the ink decides: a sharp joint's
+              // ink (miter or round join) extends >= 0.5w beyond the sharp
+              // intersection X along the outer bisector, an authored rounded
+              // corner's contour cuts away well short of that. Veto = the gap
+              // fits one clean arc AND the outer-apex probe finds background.
+              {
+                const gp = [];
+                const stG = Math.max(1, (s2 - e1) >> 5);
+                for (let k2 = e1; k2 <= s2; k2 += stG) gp.push(pts[k2 % nP]);
+                if (gp.length >= 5) {
+                  let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0, sz = 0;
+                  for (const p2 of gp) {
+                    const x = p2[0], y = p2[1], z = x * x + y * y;
+                    sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y;
+                    sxz += x * z; syz += y * z; sz += z;
+                  }
+                  const n3 = gp.length;
+                  const det3 = sxx * (syy * n3 - sy * sy) - sxy * (sxy * n3 - sy * sx) + sx * (sxy * sy - syy * sx);
+                  if (Math.abs(det3) > 1e-6) {
+                    const a3 = (sxz * (syy * n3 - sy * sy) - sxy * (syz * n3 - sy * sz) + sx * (syz * sy - syy * sz)) / det3;
+                    const b3 = (sxx * (syz * n3 - sy * sz) - sxz * (sxy * n3 - sy * sx) + sx * (sxy * sz - syz * sx)) / det3;
+                    const c3 = (sxx * (syy * sz - syz * sy) - sxy * (sxy * sz - syz * sx) + sxz * (sxy * sy - syy * sx)) / det3;
+                    const cx3 = a3 / 2, cy3 = b3 / 2;
+                    const r3 = Math.sqrt(Math.max(0, c3 + cx3 * cx3 + cy3 * cy3));
+                    let rss = 0;
+                    for (const p2 of gp) { const d3 = Math.hypot(p2[0] - cx3, p2[1] - cy3) - r3; rss += d3 * d3; }
+                    const rms = Math.sqrt(rss / n3);
+                    const sweep = r3 > 0 ? gapArc / r3 : 0;
+                    // NOTE a sweep ceiling (≤1.9) was tried instead of the
+                    // width-relative radius floor to make thin/bold veto the
+                    // same corners — it kills the bottom-edge fix: junction-
+                    // carved gaps legitimately sweep 2.5+ rad around a single
+                    // corner. The r/wEff floor stays; its cross-weight cost
+                    // is ledgered.
+                    if (r3 >= 0.55 * wEff && r3 <= 6 * wEff &&
+                        rms <= Math.max(2, 0.05 * r3) && sweep >= 0.5) {
+                      let apexInked = false;
+                      if (o.ink) {
+                        const bl = Math.hypot(u1x - u2x, u1y - u2y) || 1;
+                        const bx2 = (u1x - u2x) / bl, by2 = (u1y - u2y) / bl;
+                        const dP = 0.38 * wEff;
+                        let hits = 0, seen = 0;
+                        for (const [ox, oy] of [[0, 0], [2, 0], [-2, 0], [0, 2], [0, -2]]) {
+                          const xi = Math.round(X[0] + bx2 * dP + ox - 0.5);
+                          const yi = Math.round(X[1] + by2 * dP + oy - 0.5);
+                          if (xi >= 0 && yi >= 0 && xi < w && yi < h) {
+                            seen++;
+                            if (o.ink[yi * w + xi]) hits++;
+                          }
+                        }
+                        apexInked = seen > 0 && hits >= seen * 0.5;
+                      }
+                      // a corner needs two STRAIGHTS. If either flanking run
+                      // rides the gap's own circle (a chord-run of a lens
+                      // ring or a heart lobe), this is an arc continuation:
+                      // neither veto-anchor it (kills the ellipse snap and
+                      // flattens lobes) nor fuse it (plants an off-arc X)
+                      const runFrac = R => {
+                        let on = 0, n5 = 0;
+                        const st5 = Math.max(1, (R[1] - R[0]) >> 3);
+                        for (let k5 = R[0]; k5 <= R[1]; k5 += st5) {
+                          const p5 = pts[k5 % nP];
+                          n5++;
+                          if (Math.abs(Math.hypot(p5[0] - cx3, p5[1] - cy3) - r3) <= Math.max(2, 0.05 * r3)) on++;
+                        }
+                        return n5 ? on / n5 : 0;
+                      };
+                      if (Math.max(runFrac(R1), runFrac(R2)) >= 0.6) continue;
+                      if (!apexInked) {
+                        // authored rounded corner between straights: never
+                        // fuse; anchor the TRUE tangent points — where the
+                        // fitted circle touches each run's line (the run ends
+                        // themselves creep into the arc by the lateral
+                        // tolerance) — exactly where a designer anchors a
+                        // rounded corner
+                        for (const [P0, ux5, uy5] of [[B1, u1x, u1y], [A2m, u2x, u2y]]) {
+                          const tPar = (cx3 - P0[0]) * ux5 + (cy3 - P0[1]) * uy5;
+                          const T5 = [P0[0] + tPar * ux5, P0[1] + tPar * uy5];
+                          let bi5 = 0, bd5 = Infinity;
+                          for (let i5 = 0; i5 < nP; i5++) {
+                            const d5 = (pts[i5][0] - T5[0]) ** 2 + (pts[i5][1] - T5[1]) ** 2;
+                            if (d5 < bd5) { bd5 = d5; bi5 = i5; }
+                          }
+                          const tp5 = pts[bi5];
+                          if (!nearForced(tp5, wEff * 0.5)) fitForced.push(tp5.slice());
+                        }
+                        continue;
+                      }
+                    }
+                  }
+                }
+              }
+              if (gapArc > maxGap) continue;
               if (Math.hypot(X[0] - q1[0], X[1] - q1[1]) > 2 * wEff ||
                   Math.hypot(X[0] - p2j[0], X[1] - p2j[1]) > 2 * wEff) continue;
               // a fuse pivot near X is the SAME corner estimated more

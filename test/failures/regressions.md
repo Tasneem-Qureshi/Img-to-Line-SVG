@@ -33,8 +33,43 @@ until each is green in the gated suite.
 
 | failing check | current | gate | mechanism owning the fix |
 |---|---|---|---|
-| test 47 — bold bottom edge is a 2-anchor straight | segs `LLLLC`, no bottom L | L with y≈15±0.5, left x ≤ 8.2, right ≈ 12.2±0.7 | straight-run X far-endpoint anchor at the rounded-corner transition stopped firing at bold after the litter-gate revert; the corner pivot (c2) also sits 0.5–0.8u past (12.2,15) |
+| ~~test 47 — bold bottom edge is a 2-anchor straight~~ **FIXED 2026-09-25** (rounded-corner veto round, see below) | ~~segs `LLLLC`, no bottom L~~ passes both weights | L with y≈15±0.5, left x ≤ 8.2, right ≈ 12.2±0.7 | root cause was neither of the suspects: run-fusion's width-scaled `maxGap` outgrew the icon's corner radii at bold, fusing whole AUTHORED rounded corners into fake sharp X's (0.9u off-ink), and the in-fit H/V/45° snap mutated span endpoints while neighbors kept the forced anchors (seam nubs / leaning bar) |
 | test 47 — bold handle ends on the body edge | right end (12.4,15.8) | within 0.7 of (11.8,15) | junction-end extension: the ray crossing lands on the ring's raw pool-sag points; the fitted ring is clean but not visible to mergeChains |
 | test 47 — bold small wave flat ends AT the ink face | mean offset 0.74 | ≤ 0.70 (0.25·w) | one end's hygiene trim reaches the arc middle (stroke is only ~2.1w long); the probe cannot see a face from there and the restored end keeps ~0.3u of curl |
 | test 42 — bell-480 phantom ≤ 3% | 3.0% (rounding edge) | < 3% | net cap/corner-geometry drift at 480px, ~0.1% over; appeared during this round |
-| test 45 — lucide bell centerline max | 1.032 | ≤ 1.0 | the bell's bottom-right corner (21,17) rebuilds ~1.0u short; unaffected by spur/run/cap toggles in bisection — corner-rebuild arm geometry at this flank-to-edge joint |
+| test 45 — lucide bell centerline max | 1.032 → 1.027 (2026-09-25) | ≤ 1.0 | the bell's bottom-right corner (21,17) rebuilds ~1.0u short; unaffected by spur/run/cap toggles in bisection — corner-rebuild arm geometry at this flank-to-edge joint |
+
+## Rounded-corner veto round (2026-09-25, on `bold-weight-v2.5`)
+
+Suite: **285/290** (bottom-edge blocker fixed; the four rows above remain).
+Mechanisms landed in the run-fusion stage: (1) Kasa circle-fit VETO on the
+gap + ink probe 0.38w along the outer bisector past the would-be sharp X
+(sharp joints stay inked ≥0.5w even round-join; an authored rounded contour
+cuts away short) + per-run on-circle guard (an arc-continuation pair —
+lens-ring chords, heart lobes — neither vetoes nor fuses); (2) veto anchors
+at the TRUE tangent points (circle center projected onto each run line,
+snapped to the polyline); (3) fused-X intersections from middle-half run
+directions (endpoint chords tilt from smoothing sag → pivots 0.5–0.8u past
+the joint); (4) in-fit snap no longer mutates endpoints — all H/V/45°
+snapping moved to post-cleanup `axisSnapSegLines`, which moves every
+occurrence of a shared anchor coherently (kills the seam-nub / duplicate
+corner-anchor class).
+
+Corpus vs the v2.4 floor, n=400 (NOTE: conflates this round with the
+pre-existing v2.5-branch delta — the floor predates the branch):
+- clean 240/480: allPass −0.5/−0.8 (within policy) with pathCount +5.9/+5.3,
+  centerline +4.0/+4.4, fitQuality +5.6/+4.9, topology +1/+1
+- clean 96: allPass 29.2 vs 33.2 (**blocks**) — fitQuality 50.4 vs 55: veto
+  tangent anchors are treated as CORNERS by the fit (forced = corner by
+  construction), so smoothness fails at every vetoed corner; fix = smooth-pin
+  plumbing (forced split WITHOUT corner semantics + G1 alignment across it)
+- bold 240: allPass 2.3 vs 4.3 (**blocks**); crossWeight 12.3/13.3 vs 21/22
+  (**blocks**): the veto's 0.55×wEff radius floor is width-relative, so thin
+  and bold veto DIFFERENT corners of the same icon, and tangent-anchor
+  positions jitter across weights (polyline-snap differs). A sweep ceiling
+  (≤1.9) was tried as a scale-free replacement and reverted: junction-carved
+  gaps legitimately sweep 2.5+ rad around one corner (bullhorn bottom-left)
+- suite fixture: camera-96 coverage 98→96.6 (test-first fixture = the
+  already-failing check; residual fit sag at vetoed r≈1–2.4w corners at
+  96px; arc-midpoint pinning fixes the sag but violates the 0.5w cluster
+  rule and cross-weight anchor counts — needs the same smooth-pin plumbing)
