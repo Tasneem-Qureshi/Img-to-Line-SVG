@@ -73,3 +73,53 @@ pre-existing v2.5-branch delta — the floor predates the branch):
   already-failing check; residual fit sag at vetoed r≈1–2.4w corners at
   96px; arc-midpoint pinning fixes the sag but violates the 0.5w cluster
   rule and cross-weight anchor counts — needs the same smooth-pin plumbing)
+
+## Arrowhead round (2026-10-05, on `bold-weight-v2.5`)
+
+User report: `mdi-light:arrange-bring-forward` traced with swoopy corners, a
+mushy arrowhead and curled ends — "even high Detail doesn't fix it" (correct:
+these are junction-stage decisions made before fitting). Fixture
+`test/failures/gen-arrange.js` → `arrange-thin` (0.7u, the reference weight)
+and `arrange-bold` (1.4u) + `arrange.svg`; test 48 (26 checks, both weights).
+Suite **311/316** — the five rows above remain the only failures.
+
+Before (a4bdb9a) → after, same fixtures:
+- thin: 5 paths, head = two separate CURVED pieces bent to the pool centroid
+  (7.7,7.7), shaft stopping at 7.7 → 4 paths, head ONE 3-anchor L with the
+  apex at (7.4,7.4), shaft a 2-anchor straight apex→tip, both squares exact
+- bold: 2 paths — arrowhead deleted, back square broken open into a 9-anchor
+  zigzag through the pierced corner → 4 paths, head L, shaft straight; only
+  residue: the pierced corner of the back square rounds (5 anchors, not 4)
+
+Mechanisms (mergeChains unless noted):
+1. **corner + spoke** pre-pass (before the spur-fuse): two arms meeting
+   ~perpendicular (|cos| ≤ 0.5) with free far ends + a third arm leaving the
+   pool along their bisector → fuse the arms through their fitted lines'
+   intersection (forced apex, ink-checked), aim the spoke's trim at it
+   (`trim[e].apex`, honored by extTarget; corner-join skips such ends). The
+   old behavior extended all three ends to the pool CENTROID, which sits
+   down the spoke — hence the swoops. Arm directions via `armLine` (least
+   squares beyond 0.6w from the junction: dirAt's 7-point tangent inside a
+   pool curl reads a 90° corner as a bent continuation). The fused chain
+   cuts each arm's pool curl.
+2. **spur-fuse**: a spur candidate whose pool holds exactly ONE
+   near-collinear partner (armLine dot < −0.95) and no other arm with
+   dot < −0.75 is a through-stroke's tail (a shaft piercing a corner), not a
+   corner-tip spur. Uniqueness matters: an acute corner's two legs are both
+   ≈ −0.91 to its tip spur — a single-arm test vetoed every bullhorn mouth
+   corner (bisected: 285 → 279).
+3. **face-branch removal** (trace()): rings passing through the joint count
+   as a real arm (skipping them deleted every stub past a crossing); sliver
+   gate 1.6w → 1.0w (real slivers 0.5–0.7w; bold barbs retract to ~1.3w;
+   width- and DT-midpoint-based thinness both failed on other fixtures);
+   a short parent spanning two joints qualifies (a tail between a crossing
+   and its own face); a parent end whose pool emptied of ≥ 2 slivers (a
+   FACE) becomes a free end — for a lone sliver the corner-join still owns it.
+
+**Corpus guardrail for this round: NOT YET RUN** (2026-10-05 — the n=400
+runs exceeded the session's background time cap; two parallel slices slowed
+each other past it). Before merging, run one slice at a time and compare to
+`test/baseline.json` (and to the 2026-09-25 numbers above):
+`node test/corpus-harness/harness.js --n 400 --sizes 96` (then 240, 480), and
+`--bold --sizes 240` (then 480). Expect pathCount/topology gains wherever
+icons carry arrowheads; any drop > 1.0 pt or headline drop blocks.

@@ -1690,6 +1690,81 @@ console.log('47. bullhorn (test/failures): cross-weight consistency, corners, fl
   }
 }
 
+console.log('48. arrange (test/failures): arrowhead corner+spoke, shaft through a corner, notch ends');
+{
+  // Ground truth (gen-arrange.js): back square M4 4 H12 V12 Z (sharp corners),
+  // front square M13.4 7.5 H15.4 V15.4 H7.5 V13.4 (butt ends at the notch),
+  // shaft M7.4 7.4 L13 13 (butt, THROUGH the back square's corner), head
+  // M9.9 7.4 L7.4 7.4 L7.4 9.9. Reported defects (2026-10-05): barbs bent
+  // into swoops toward the apex pool's centroid and left as separate curved
+  // pieces, shaft stopping short / its tail past the corner deleted, ends
+  // curled. Thin = the reference weight; bold doubles it.
+  const H3 = require(path.join(__dirname, 'corpus-harness', 'harness.js'));
+  const zlib3 = require('zlib');
+  const near3 = (p, x, y, tol) => Math.hypot(p[0] - x, p[1] - y) <= tol;
+  for (const [weight, sw, tol] of [['thin', 0.7, 0.25], ['bold', 1.4, 0.35]]) {
+    const raw = zlib3.gunzipSync(fs.readFileSync(path.join(__dirname, 'failures', `arrange-${weight}.rgba.gz`)));
+    const w = raw.readUInt32LE(0), h = raw.readUInt32LE(4);
+    const img = { width: w, height: h, data: new Uint8ClampedArray(raw.buffer, raw.byteOffset + 8, w * h * 4) };
+    const res = H3.traceRender(img);
+    const tr = H3.parseTraced(res.svg, res.traceW, 28, -2);
+    check(`arrange ${weight}: one weight class`, res.weights.length === 1, `got ${res.weights.length}`);
+    check(`arrange ${weight}: 4 paths (back square, front square, shaft, head)`, tr.subs.length === 4, `got ${tr.subs.length}`);
+    const closed = tr.subs.filter(s => s.closed);
+    const open = tr.subs.filter(s => !s.closed);
+    check(`arrange ${weight}: one closed path (the back square)`, closed.length === 1, `got ${closed.length}`);
+    if (closed.length === 1) {
+      const sq = closed[0];
+      // the shaft pierces the (12,12) corner; the other three must be sharp
+      check(`arrange ${weight}: back square <= 5 anchors, 3 untouched corners exact`,
+        sq.anchors <= 5 &&
+        sq.poly.some(p => near3(p, 4, 4, 0.2)) && sq.poly.some(p => near3(p, 12, 4, 0.2)) && sq.poly.some(p => near3(p, 4, 12, 0.2)),
+        `anchors ${sq.anchors}`);
+      const allAnchors = [sq.cmds.length ? sq.cmds[0].pts[0] : sq.startPt].concat(sq.cmds.map(c => c.pts[c.pts.length - 1]));
+      const sharp = [[4, 4], [12, 4], [4, 12]].filter(([x, y]) => allAnchors.some(a => near3(a, x, y, 0.2))).length;
+      check(`arrange ${weight}: back square's three free corners are anchors`, sharp === 3, `${sharp}/3`);
+    }
+    const shaft = open.find(s => s.anchors === 2 && s.poly.some(p => near3(p, 10.2, 10.2, 0.6)));
+    check(`arrange ${weight}: shaft is a 2-anchor straight`, !!shaft && shaft.cmds.every(c => c.c === 'L'),
+      shaft ? shaft.cmds.map(c => c.c).join('') : 'not found');
+    if (shaft) {
+      const e0 = shaft.poly[0], e1 = shaft.poly[shaft.poly.length - 1];
+      check(`arrange ${weight}: shaft runs apex (7.4,7.4) -> tip (13,13)`,
+        (near3(e0, 7.4, 7.4, tol) && near3(e1, 13, 13, tol)) || (near3(e1, 7.4, 7.4, tol) && near3(e0, 13, 13, tol)),
+        `${e0.map(v => v.toFixed(1))} / ${e1.map(v => v.toFixed(1))}`);
+    }
+    const head = open.find(s => s.anchors === 3 && s.poly.some(p => near3(p, 7.4, 7.4, 0.6)) && s.poly.some(p => near3(p, 9.9, 7.4, 0.7)));
+    check(`arrange ${weight}: arrowhead is ONE 3-anchor L path`, !!head && head.cmds.every(c => c.c === 'L'),
+      head ? head.cmds.map(c => c.c).join('') : 'not found');
+    if (head) {
+      const apex = head.cmds[0].pts[head.cmds[0].pts.length - 1];
+      check(`arrange ${weight}: arrowhead apex at (7.4,7.4)`, near3(apex, 7.4, 7.4, tol), apex.map(v => v.toFixed(2)).join(','));
+      const e0 = head.poly[0], e1 = head.poly[head.poly.length - 1];
+      check(`arrange ${weight}: barbs end at (9.9,7.4) and (7.4,9.9)`,
+        (near3(e0, 9.9, 7.4, tol) && near3(e1, 7.4, 9.9, tol)) || (near3(e1, 9.9, 7.4, tol) && near3(e0, 7.4, 9.9, tol)),
+        `${e0.map(v => v.toFixed(1))} / ${e1.map(v => v.toFixed(1))}`);
+    }
+    const front = open.find(s => s.anchors === 5 && s.poly.some(p => near3(p, 15.4, 15.4, 0.5)));
+    check(`arrange ${weight}: front square is a 5-anchor L path`, !!front && front.cmds.every(c => c.c === 'L'),
+      front ? front.cmds.map(c => c.c).join('') : 'not found');
+    if (front) {
+      const e0 = front.poly[0], e1 = front.poly[front.poly.length - 1];
+      check(`arrange ${weight}: notch ends at (13.4,7.5) and (7.5,13.4) — butt faces`,
+        (near3(e0, 13.4, 7.5, tol) && near3(e1, 7.5, 13.4, tol)) || (near3(e1, 13.4, 7.5, tol) && near3(e0, 7.5, 13.4, tol)),
+        `${e0.map(v => v.toFixed(1))} / ${e1.map(v => v.toFixed(1))}`);
+    }
+    // no anchor cluster anywhere (0.5w)
+    let worstGap = 1e9;
+    for (const s of tr.subs) {
+      const ap = [s.cmds.length ? s.cmds[0].pts[0] : s.startPt];
+      for (const c of s.cmds) ap.push(c.pts[c.pts.length - 1]);
+      const lim = s.closed ? ap.length - 1 : ap.length;
+      for (let i = 1; i < lim; i++) worstGap = Math.min(worstGap, Math.hypot(ap[i][0] - ap[i - 1][0], ap[i][1] - ap[i - 1][1]));
+    }
+    check(`arrange ${weight}: no anchor pair closer than 0.5w`, worstGap >= 0.5 * sw, `min gap ${worstGap.toFixed(2)}`);
+  }
+}
+
 // --- write a sample SVG for eyeballing -------------------------------------
 {
   const img = makeImage(300, 200, WHITE);

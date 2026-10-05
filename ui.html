@@ -658,8 +658,158 @@ const LineTracer = (() => {
       const len = Math.hypot(dx, dy) || 1;
       return [dx / len, dy / len]; // pointing inward, away from the junction
     };
+    // line through an arm's CLEAN part: everything farther than ~0.6w from
+    // the junction end (short arms never get junction-trimmed, so their last
+    // half-width curls toward the pool centroid — a direction read there,
+    // like dirAt's 7-point tangent, turns a 90° corner into a bent
+    // continuation). Least squares over those points: exact direction and
+    // base for straight arms. null when the arm is too short to judge.
+    const armLine = (c, e) => {
+      const pts = c.points, n = pts.length;
+      const skip = (c.width || 2) * 0.6;
+      const sel = [];
+      let acc = 0;
+      for (let i = 0; i < n; i++) {
+        const idx = e === 0 ? i : n - 1 - i;
+        if (i > 0) {
+          const pi = e === 0 ? idx - 1 : idx + 1;
+          acc += Math.hypot(pts[idx][0] - pts[pi][0], pts[idx][1] - pts[pi][1]);
+        }
+        if (acc >= skip) sel.push(pts[idx]);
+      }
+      if (sel.length < 3) return null;
+      let mx = 0, my = 0;
+      for (const p of sel) { mx += p[0]; my += p[1]; }
+      mx /= sel.length; my /= sel.length;
+      let sxx = 0, sxy = 0, syy = 0;
+      for (const p of sel) { const dx = p[0] - mx, dy = p[1] - my; sxx += dx * dx; sxy += dx * dy; syy += dy * dy; }
+      const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+      let dx = Math.cos(ang), dy = Math.sin(ang);
+      const endP = e === 0 ? pts[0] : pts[n - 1];
+      if ((mx - endP[0]) * dx + (my - endP[1]) * dy < 0) { dx = -dx; dy = -dy; } // inward, like dirAt
+      return { dir: [dx, dy], base: [mx, my] };
+    };
 
     let list = chains.slice();
+    // corner + spoke pre-pass — must run BEFORE the spur-fuse below: at bold
+    // weights a ~1.3w arrowhead barb qualifies as a "spur", and the spur-fuse
+    // then welds the OTHER barb to the shaft around a bogus apex
+    {
+      const ends = [];
+      list.forEach((c, ci) => {
+        if (c.closed || c.points.length < 2) return;
+        for (const e of [0, 1]) {
+          if (c.endDeg && c.endDeg[e] > 2) {
+            const tr = c.trim && c.trim[e];
+            const p = tr ? tr.p : (e === 0 ? c.points[0] : c.points[c.points.length - 1]);
+            ends.push({ ci, e, p, jr: tr ? tr.r : 2, dir: dirAt(c, e), width: c.width || 1,
+              frag: (c.geomLength || c.points.length) < (c.width || 1) * 0.5 });
+          }
+        }
+      });
+      if (ends.length >= 3) {
+      // corner + spoke (an arrowhead): two arms meeting ~perpendicular with
+      // free far ends, and a third arm leaving the pool along their
+      // bisector. None of the three pair as continuations, so every end
+      // used to extend to the pool CENTROID — which sits down the spoke,
+      // bending both arms into swoops and leaving the head as separate
+      // curved pieces. Fuse the two arms through their tangents'
+      // intersection (the true apex, verified on ink) and aim the spoke at
+      // it.
+      {
+        const deepDir = (c, e) => {
+          const pts = c.points, n = pts.length;
+          const kd = Math.min(n - 1, Math.max(7, Math.round((c.width || 2) * 0.5)));
+          const a = e === 0 ? pts[0] : pts[n - 1], b = e === 0 ? pts[kd] : pts[n - 1 - kd];
+          const dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy) || 1;
+          return [dx / l, dy / l]; // inward, away from the junction
+        };
+        const samePool = (A, B) => {
+          const lim = Math.max(4, (A.jr + B.jr) * 0.75);
+          return Math.abs(A.p[0] - B.p[0]) <= lim && Math.abs(A.p[1] - B.p[1]) <= lim;
+        };
+        const farFree = E => { const c = list[E.ci]; return !c.endDeg || c.endDeg[1 - E.e] <= 1; };
+        const cornerOps = [];
+        const usedC = new Set();
+        for (let i = 0; i < ends.length; i++) for (let j = i + 1; j < ends.length; j++) {
+          const A = ends[i], B = ends[j];
+          if (A.ci === B.ci || !samePool(A, B)) continue;
+          if (!farFree(A) || !farFree(B)) continue;
+          const LA = armLine(list[A.ci], A.e), LB = armLine(list[B.ci], B.e);
+          if (!LA || !LB) continue;
+          const dA = LA.dir, dB = LB.dir;
+          const cosAB = dA[0] * dB[0] + dA[1] * dB[1];
+          if (Math.abs(cosAB) > 0.5) continue; // corner-like: 60°..120°
+          let bx = dA[0] + dB[0], by = dA[1] + dB[1];
+          const bl = Math.hypot(bx, by) || 1; bx /= bl; by /= bl;
+          let S = null;
+          for (const E of ends) {
+            if (E === A || E === B || E.ci === A.ci || E.ci === B.ci || !samePool(A, E)) continue;
+            const LS = armLine(list[E.ci], E.e);
+            const dS = LS ? LS.dir : deepDir(list[E.ci], E.e);
+            if (dS[0] * bx + dS[1] * by > 0.8) { S = E; break; } // spoke along the bisector
+          }
+          if (!S) continue;
+          const pA = LA.base, pB = LB.base;
+          const det = dA[0] * dB[1] - dA[1] * dB[0];
+          if (Math.abs(det) < 0.3) continue;
+          const t = ((pB[0] - pA[0]) * dB[1] - (pB[1] - pA[1]) * dB[0]) / det;
+          const apex = [pA[0] + dA[0] * t, pA[1] + dA[1] * t];
+          const reach = Math.max(A.jr, B.jr, list[A.ci].width || 2) * 1.6;
+          if (Math.hypot(apex[0] - A.p[0], apex[1] - A.p[1]) > reach) continue;
+          if (inkCtx) { // centerline apexes lie ON ink
+            const x = Math.round(apex[0] - 0.5), y = Math.round(apex[1] - 0.5);
+            if (!(x >= 0 && y >= 0 && x < inkCtx.w && y < inkCtx.h && inkCtx.ink[y * inkCtx.w + x] === 1)) continue;
+          }
+          if (usedC.has(A.ci) || usedC.has(B.ci) || usedC.has(S.ci)) continue;
+          usedC.add(A.ci); usedC.add(B.ci); usedC.add(S.ci);
+          cornerOps.push({ A, B, S, apex });
+        }
+        if (cornerOps.length) {
+          const drop = new Set();
+          for (const op of cornerOps) {
+            const a = list[op.A.ci], b = list[op.B.ci], s = list[op.S.ci];
+            // drop each arm's pool-curl (its last ~0.6w, untrimmed on short
+            // arms): kept, the fused chain zigzags tip→curl→apex→curl→tip
+            // and fits as curves with the apex dragged toward the pool
+            const cutCurl = (pts, w) => { // junction end is the LAST element
+              const skip = (w || 2) * 0.6, n = pts.length;
+              let acc = 0, cutN = 0;
+              for (let i = n - 1; i > 0; i--) {
+                acc += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+                if (acc >= skip) break;
+                cutN++;
+              }
+              return cutN < n - 2 ? pts.slice(0, n - cutN) : pts;
+            };
+            const ptsA = cutCurl(op.A.e === 1 ? a.points.slice() : a.points.slice().reverse(), a.width);
+            const ptsB = cutCurl(op.B.e === 0 ? b.points.slice().reverse() : b.points.slice(), b.width).reverse();
+            const lenA = a.geomLength != null ? a.geomLength : a.points.length;
+            const lenB = b.geomLength != null ? b.geomLength : b.points.length;
+            const ew = ch => ch.endWidths || [ch.width || 1, ch.width || 1];
+            list.push({
+              closed: false,
+              forced: (a.forced || []).concat(b.forced || [], [op.apex]),
+              points: ptsA.concat([op.apex], ptsB),
+              width: ((a.width || 1) * lenA + (b.width || 1) * lenB) / ((lenA + lenB) || 1),
+              geomLength: lenA + lenB +
+                Math.hypot(op.apex[0] - ptsA[ptsA.length - 1][0], op.apex[1] - ptsA[ptsA.length - 1][1]) +
+                Math.hypot(ptsB[0][0] - op.apex[0], ptsB[0][1] - op.apex[1]),
+              endDeg: [op.A.e === 1 ? a.endDeg[0] : a.endDeg[1], op.B.e === 0 ? b.endDeg[1] : b.endDeg[0]],
+              endWidths: [op.A.e === 1 ? ew(a)[0] : ew(a)[1], op.B.e === 0 ? ew(b)[1] : ew(b)[0]],
+              trim: [a.trim ? a.trim[1 - op.A.e] : null, b.trim ? b.trim[1 - op.B.e] : null]
+            });
+            drop.add(op.A.ci); drop.add(op.B.ci);
+            // the spoke terminates AT the apex, not at the pool centroid
+            if (!s.trim) s.trim = [null, null];
+            s.trim[op.S.e] = Object.assign({}, s.trim[op.S.e] || { p: op.S.p, r: op.S.jr }, { apex: op.apex });
+          }
+          list = list.filter((_, ci) => !drop.has(ci));
+        }
+      }
+
+      }
+    }
     // corner-tip spurs -> forced corner apexes (must run BEFORE pairing so
     // the pool's arms fuse through the true corner instead of around it)
     {
@@ -680,9 +830,42 @@ const LineTracer = (() => {
               const jp2 = (c.trim && c.trim[e] && c.trim[e].p) || endPt(c, e);
               const tip = endPt(c, o2);
               const dl = Math.hypot(tip[0] - jp2[0], tip[1] - jp2[1]) || 1;
-              spurs.push({ ci, jp: jp2, tip, W,
-                jr: Math.max((c.trim && c.trim[e] && c.trim[e].r) || 0, W),
-                dir: [(tip[0] - jp2[0]) / dl, (tip[1] - jp2[1]) / dl] });
+              const sdir = [(tip[0] - jp2[0]) / dl, (tip[1] - jp2[1]) / dl];
+              const jrS = Math.max((c.trim && c.trim[e] && c.trim[e].r) || 0, W);
+              // a short free-tailed piece that CONTINUES another arm straight
+              // across the pool is a stroke's tail past a joint it pierces
+              // (a shaft through a square's corner), not a corner spur —
+              // the through-pair must keep it. A real corner spur sits on
+              // the corner's bisector, 45° off both arms.
+              // Decide by UNIQUENESS: a through-stroke has exactly one
+              // near-collinear partner and no other arm even moderately
+              // opposite; an acute corner's two legs are BOTH nearly
+              // anti-parallel to its tip spur (48° corner: dot −0.91 each),
+              // so any single-arm test vetoes genuine spurs.
+              let n95 = 0, n75 = 0;
+              for (let oi = 0; oi < list.length; oi++) {
+                const o = list[oi];
+                if (o === c || o.closed) continue;
+                // the partner must be a real stroke (long, or a connector
+                // whose far end is attached too — junction trimming at a
+                // fused corner shrinks a through-segment below any length
+                // gate), read on its CLEAN part: dirAt's 7-point tangent
+                // inside a pool curl swings freely
+                const oLen2 = o.geomLength || o.points.length;
+                for (const eo of [0, 1]) {
+                  if (!att(o, eo)) continue;
+                  if (oLen2 < 1.5 * W && !att(o, 1 - eo)) continue;
+                  const op2 = (o.trim && o.trim[eo] && o.trim[eo].p) || endPt(o, eo);
+                  if (Math.hypot(op2[0] - jp2[0], op2[1] - jp2[1]) > jrS * 1.5) continue;
+                  const ol = armLine(o, eo);
+                  if (!ol) continue;
+                  const dot = ol.dir[0] * sdir[0] + ol.dir[1] * sdir[1];
+                  if (dot < -0.95) n95++;
+                  if (dot < -0.75) n75++;
+                }
+              }
+              if (n95 === 1 && n75 === 1) continue; // a stroke's tail past a joint it pierces
+              spurs.push({ ci, jp: jp2, tip, W, jr: jrS, dir: sdir });
               tagged = true;
               break;
             }
@@ -1020,6 +1203,10 @@ const LineTracer = (() => {
         for (const e of [0, 1]) {
           const free = !c.endDeg || c.endDeg[e] <= 1;
           const tr = c.trim && c.trim[e];
+          // an end owned by a corner+spoke joint terminates at its fused
+          // apex — never a corner-join candidate (it would weld the spoke to
+          // the nearest barb tip)
+          if (tr && tr.apex) continue;
           const p = !free && tr ? tr.p
             : (e === 0 ? c.points[0] : c.points[c.points.length - 1]);
           ends.push({
@@ -1305,6 +1492,7 @@ const LineTracer = (() => {
     // centerline — the pool centroid of a fused blob sits off both
     // centerlines and would bend the joint. Fallback: the pool center.
     const extTarget = (c, e, tr) => {
+      if (tr && tr.apex) return tr.apex; // a corner+spoke joint: the spoke ends at the fused apex
       const end = e === 0 ? c.points[0] : c.points[c.points.length - 1];
       // width-deep tangent as the base aim; the end curls in the pool, so
       // refine with a FAN: the true attach direction crosses the partner's
@@ -3454,10 +3642,16 @@ const LineTracer = (() => {
       // including the corner-tip spurs the merge machinery needs.
       {
         const del = new Set();
+        const fbEnds = []; // parent ends whose pool was emptied
         for (const c of chains) {
           if (c.closed || c.points.length < 2 || !c.endDeg) continue;
           const cw = c.width || 2;
-          if ((c.geomLength || c.points.length) < cw * 2) continue;
+          // the parent must be a real stroke: long, OR a short piece spanning
+          // two junctions (a stroke's tail between a crossing and its own
+          // butt face — its face slivers must still be cleaned)
+          const cLen = c.geomLength || c.points.length;
+          const spansJoints = c.endDeg[0] > 2 && c.endDeg[1] > 2;
+          if (cLen < cw * 2 && !spansJoints) continue;
           for (const e of [0, 1]) {
             if (c.endDeg[e] < 3) continue;
             const pE = e === 0 ? c.points[0] : c.points[c.points.length - 1];
@@ -3465,7 +3659,17 @@ const LineTracer = (() => {
             const near = [];
             let real = false;
             for (const o of chains) {
-              if (o === c || o.closed) continue;
+              if (o === c) continue;
+              if (o.closed) {
+                // a ring passing THROUGH the joint is a substantial arm (a
+                // stroke crossing a square's edge): skipping rings here
+                // deleted every short stub beyond such a crossing
+                const st = Math.max(1, o.points.length >> 6);
+                for (let i = 0; i < o.points.length; i += st)
+                  if (Math.hypot(o.points[i][0] - pE[0], o.points[i][1] - pE[1]) < rr) { real = true; break; }
+                if (real) break;
+                continue;
+              }
               let touches = false;
               for (const oe of [0, 1]) {
                 const p2 = oe === 0 ? o.points[0] : o.points[o.points.length - 1];
@@ -3474,14 +3678,53 @@ const LineTracer = (() => {
               if (!touches) continue;
               const oLen = o.geomLength || o.points.length;
               const oFree = o.endDeg && (o.endDeg[0] <= 1 || o.endDeg[1] <= 1);
-              if (oLen < cw * 1.6 && oFree) near.push(o);
+              // a face-branch sliver is the face's own medial axis inside the
+              // cap: short AND thin (its ink radius tapers toward the face
+              // corners). A short arm of FULL width is a real stroke —
+              // arrowhead barbs and crossing stubs are only ~1w long, and a
+              // plain length gate ate them
+              // a face-branch sliver is the face's own medial axis: ~0.5-0.7w
+              // long. A free arm of >= 1w is a real stroke — at bold weights
+              // arrowhead barbs retract to ~1.3w and a 1.6w gate deleted them
+              if (oLen < cw * 1.0 && oFree) near.push(o);
               else real = true;
             }
-            if (!real && near.length)
+            if (!real && near.length) {
               for (const o of near) del.add(o);
+              // only a FACE empties into a free butt end: a flat face grows
+              // two branch halves. A lone sliver is a corner-tip spur whose
+              // corner the join machinery still owns — keep that end
+              // junction-attached (resetting it broke every mouth corner)
+              if (near.length >= 2) fbEnds.push({ c, e, pE, rr });
+            }
           }
         }
-        if (del.size) { chains = chains.filter(c => !del.has(c)); fbDeleted = del.size; }
+        if (del.size) {
+          chains = chains.filter(c => !del.has(c));
+          fbDeleted = del.size;
+          // a parent end whose pool held ONLY slivers is now a free butt end:
+          // leaving it junction-attached (stale degree) lets the corner-join
+          // pass weld it to whatever other end sits a width away
+          for (const fe of fbEnds) {
+            let stillJoint = false;
+            for (const o of chains) {
+              if (o === fe.c) continue;
+              if (o.closed) {
+                const st = Math.max(1, o.points.length >> 6);
+                for (let i = 0; i < o.points.length; i += st)
+                  if (Math.hypot(o.points[i][0] - fe.pE[0], o.points[i][1] - fe.pE[1]) < fe.rr) { stillJoint = true; break; }
+              } else {
+                for (const p2 of [o.points[0], o.points[o.points.length - 1]])
+                  if (Math.hypot(p2[0] - fe.pE[0], p2[1] - fe.pE[1]) < fe.rr) { stillJoint = true; break; }
+              }
+              if (stillJoint) break;
+            }
+            if (!stillJoint) {
+              fe.c.endDeg[fe.e] = 1;
+              if (fe.c.trim) fe.c.trim[fe.e] = null;
+            }
+          }
+        }
       }
       const keep = [];
       for (const c of chains) {
