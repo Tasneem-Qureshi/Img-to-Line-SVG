@@ -236,4 +236,8 @@ Corpus clean@240, n=400 (same icons, one slice at a time):
 
 Finishing sits below the v2.4 floor on every build of this branch since the
 2026-09-25 veto round (90.8 → 86–88); it is not new to this round and stays a
-ledgered debt. Remaining slices for 92cdd82: clean 96 / 480, bold 240 / 480.
+ledgered debt. Clean@480, n=400, 92cdd82 vs the v2.4 floor: **ALL 36.1 vs 34.0**, pathCount
+79.0 vs 71.4, centerline 75.2 vs 63.9, width 99.7 = 99.7, anchors 99.5 vs
+99.2, grammar 85.2 vs 85.4 (−0.2, within policy), topology 63.2 vs 59.1,
+finishing 88.0 vs 91.8 (the ledgered debt), fitQuality 62.9 vs 61.6.
+Remaining slices for 92cdd82: clean 96, bold 240 / 480.
