@@ -1845,44 +1845,29 @@ const LineTracer = (() => {
           }
         }
         if (!foot) continue;
-        const apex = foot.slice();
-        const a = A.c, b = B.c;
-        if (a === b) {
-          // both ends of one chain meet here: close it through the apex
-          a.points = a.points.concat([apex]);
-          a.closed = true;
-          a.forced = (a.forced || []).concat([apex]);
-          a.trim = [null, null];
-          fused = true;
-          break;
-        }
-        const ptsA = A.e === 1 ? a.points.slice() : a.points.slice().reverse(); // ends at the pool
-        const ptsB = B.e === 0 ? b.points.slice() : b.points.slice().reverse(); // starts at the pool
-        const lenA = a.geomLength != null ? a.geomLength : a.points.length;
-        const lenB = b.geomLength != null ? b.geomLength : b.points.length;
-        const ew = ch => ch.endWidths || [ch.width || 1, ch.width || 1];
-        const merged = {
-          closed: false,
-          forced: (a.forced || []).concat(b.forced || [], [apex]),
-          points: ptsA.concat([apex], ptsB),
-          width: ((a.width || 1) * lenA + (b.width || 1) * lenB) / ((lenA + lenB) || 1),
-          geomLength: lenA + lenB +
-            Math.hypot(apex[0] - ptsA[ptsA.length - 1][0], apex[1] - ptsA[ptsA.length - 1][1]) +
-            Math.hypot(ptsB[0][0] - apex[0], ptsB[0][1] - apex[1]),
-          endDeg: [A.e === 1 ? a.endDeg[0] : a.endDeg[1], B.e === 0 ? b.endDeg[1] : b.endDeg[0]],
-          endWidths: [A.e === 1 ? ew(a)[0] : ew(a)[1], B.e === 0 ? ew(b)[1] : ew(b)[0]],
-          caps: [A.e === 1 ? (a.caps || [])[0] : (a.caps || [])[1], B.e === 0 ? (b.caps || [])[1] : (b.caps || [])[0]],
-          trim: [a.trim ? a.trim[1 - A.e] : null, b.trim ? b.trim[1 - B.e] : null]
-        };
-        list = list.filter(c => c !== a && c !== b);
-        list.push(merged);
-        fused = true;
+        // Where should the two arms end? ON the through-stroke's centerline
+        // their inner edges cross a little inside it and leave a notch (the
+        // lens "not connected at the top"); authored icons push the arms
+        // INTO the stroke until the inner edges meet at its inner edge. For
+        // arms meeting at interior angle φ with half-width w/2 that is
+        // (w/2)(1/sin(φ/2) − 1) beyond the centerline, along the outward
+        // normal (toward X). Flat caps there stay hidden in the stroke's
+        // ink; a joined vertex would bump outward by the same amount, so the
+        // arms stay separate paths.
+        const cosPhi = Math.max(-1, Math.min(1, A.dir[0] * B.dir[0] + A.dir[1] * B.dir[1]));
+        const half = Math.acos(cosPhi) / 2;
+        const dOut = Math.min(0.45 * wAB, (wAB / 2) * (1 / Math.max(0.2, Math.sin(half)) - 1));
+        const nx = X[0] - foot[0], ny = X[1] - foot[1], nl = Math.hypot(nx, ny) || 1;
+        const apex = [foot[0] + nx / nl * dOut, foot[1] + ny / nl * dOut];
+        A.tr.apex = apex.slice(); B.tr.apex = apex.slice();
+        fused = true; // re-collect: these ends are now resolved
       }
       if (!fused) break;
     }
     for (const c of list) {
       if (!c.trim) continue;
       if (c.trim[0]) {
+        if (c.trim[0].apex) (c.poleEnd = c.poleEnd || [false, false])[0] = true;
         const q = extTarget(c, 0, c.trim[0]);
         c.geomLength = (c.geomLength || c.points.length) +
           Math.hypot(q[0] - c.points[0][0], q[1] - c.points[0][1]);
@@ -1891,6 +1876,7 @@ const LineTracer = (() => {
       }
       if (c.trim[1]) {
         const last = c.points[c.points.length - 1];
+        if (c.trim[1].apex) (c.poleEnd = c.poleEnd || [false, false])[1] = true;
         const q = extTarget(c, 1, c.trim[1]);
         c.geomLength = (c.geomLength || c.points.length) +
           Math.hypot(q[0] - last[0], q[1] - last[1]);
@@ -4240,6 +4226,10 @@ const LineTracer = (() => {
     for (const c of chains) {
       if (c.closed || c.points.length < 3 || !c.endDeg) continue;
       c.caps = [null, null];
+      // an end resolved to a pole apex (two arms converging on a through-
+      // stroke) was pushed INTO that stroke's ink: a flat cap stays hidden
+      // there, a round one bumps out past the stroke's edge
+      if (c.poleEnd) for (const e of [0, 1]) if (c.poleEnd[e]) c.caps[e] = 'butt';
       // strokes shorter than ~1.5x their width: no room to measure a
       // terminal tangent at all — keep the provable minimum (round caps).
       // Longer short strokes ARE probed: with width-windowed terminal

@@ -155,11 +155,19 @@ Mechanisms (mergeChains):
    (the ray along a curved arm's end tangent lands beside the true foot).
 4. **converging terminating arms** (two arcs at a pole): end tangents meet at
    X; if a through-stroke passes within 1.2w of X (an interior point of it),
-   the two arms are FUSED into one path through that foot (forced apex), and
-   when both ends of one chain converge the chain closes — the lens becomes
-   ONE closed 4-anchor path, as authored, instead of two arcs whose caps
-   leave a notch at the pole. Guards: both arms ≥ 3w (a bell rim's end hook
-   beside a corner is not an arm — unguarded it bent the body and ate 1.5u
-   of the rim), foot ≥ 1w from the through-stroke's own ends.
+   both arms end at a common apex pushed (w/2)(1/sin(φ/2) − 1) (≤ 0.45w)
+   INTO the through-stroke along the outward normal, with FLAT caps
+   (`poleEnd` → butt in the cap pass): the arms' inner edges then meet at the
+   ring's inner edge, as authored icons do — on the centerline they cross
+   below it and leave a notch ("not connected at the top"); a fused vertex
+   with a round join (tried) bumps outward by the same amount. Guards: both
+   arms ≥ 3w (a bell rim's end hook beside a corner is not an arm — unguarded
+   it bent the body and ate 1.5u of the rim), foot ≥ 1w from the
+   through-stroke's own ends.
+
+Corpus (n=400) so far for this round: clean 240 all-pass **34.8% vs 30.9%
+floor**, every sub-metric ≥ floor (pathCount 75.2 vs 65.2, centerline 66.8
+vs 58.1, topology 60.6 vs 55.0, finishing 87.5 vs 85.7, fitQuality 59.8 vs
+54.2). Remaining slices: clean 96 / 480, bold 240 / 480.
 
 Website: the home-page example is now this globe (`web/example.png`).

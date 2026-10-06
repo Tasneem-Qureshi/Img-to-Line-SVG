@@ -1783,20 +1783,25 @@ console.log('49. globe (test/failures): poles where three strokes converge, arcs
     const res = H4.traceRender(img);
     const tr = H4.parseTraced(res.svg, res.traceW, 28, -2);
     check(`globe ${weight}: one weight class`, res.weights.length === 1, `got ${res.weights.length}`);
-    check(`globe ${weight}: 4 paths (ring, lens, 2 lines)`, tr.subs.length === 4, `got ${tr.subs.length}`);
-    const closed = tr.subs.filter(s => s.closed);
-    const ring = closed.find(s => s.poly.some(p => near4(p, 2, 12, 0.4)));
-    const lens = closed.find(s => s !== ring);
+    check(`globe ${weight}: 5 paths (ring, 2 arcs, 2 lines)`, tr.subs.length === 5, `got ${tr.subs.length}`);
+    const ring = tr.subs.find(s => s.closed);
     check(`globe ${weight}: ring is a 4-anchor closed circle through the cardinal points`,
       !!ring && ring.anchors === 4 &&
       [[12, 2], [22, 12], [12, 22], [2, 12]].every(([x, y]) => ring.poly.some(p => near4(p, x, y, 0.25))),
-      ring ? `anchors ${ring.anchors}` : 'no ring');
-    // the two meridian arcs fuse into ONE closed lens: anchors at the poles
-    // (on the ring) and at the equator — the authored structure
-    check(`globe ${weight}: lens is ONE closed 4-anchor path through both poles and the equator`,
-      !!lens && lens.anchors === 4 &&
-      [[12, 2], [12, 22], [7.4, 12], [16.6, 12]].every(([x, y]) => lens.poly.some(p => near4(p, x, y, 0.35))),
-      lens ? `anchors ${lens.anchors}` : 'no lens');
+      ring ? `anchors ${ring.anchors}` : 'no closed path');
+    // the meridian arcs end at the poles, pushed up to 0.45w INTO the ring so
+    // their inner edges meet at the ring's inner edge (no notch) — never short
+    const arcs = tr.subs.filter(s => !s.closed && s.anchors === 3);
+    check(`globe ${weight}: two meridian arcs, 3 anchors each, ending at the poles (into the ring, never short)`,
+      arcs.length === 2 && arcs.every(a => {
+        const e0 = a.poly[0], e1 = a.poly[a.poly.length - 1];
+        const top = e0[1] < e1[1] ? e0 : e1, bot = e0[1] < e1[1] ? e1 : e0;
+        return Math.abs(top[0] - 12) <= 0.3 && top[1] <= 2.15 && top[1] >= 2 - 0.5 * sw &&
+               Math.abs(bot[0] - 12) <= 0.3 && bot[1] >= 21.85 && bot[1] <= 22 + 0.5 * sw;
+      }),
+      arcs.map(a => `${a.poly[0].map(v => v.toFixed(1))}..${a.poly[a.poly.length - 1].map(v => v.toFixed(1))}`).join(' | ') || 'none');
+    check(`globe ${weight}: arcs bulge to x=7.4 and x=16.6 at the equator`,
+      [7.4, 16.6].every(x => arcs.some(a => a.poly.some(p => near4(p, x, 12, 0.35)))), 'equator points missing');
     const lines = tr.subs.filter(s => !s.closed && s.anchors === 2);
     check(`globe ${weight}: two latitude lines, 2-anchor straights at y=8.8 and y=15.2`,
       lines.length === 2 && lines.every(l => l.cmds.every(c => c.c === 'L')) &&
