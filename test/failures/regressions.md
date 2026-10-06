@@ -240,4 +240,11 @@ ledgered debt. Clean@480, n=400, 92cdd82 vs the v2.4 floor: **ALL 36.1 vs 34.0**
 79.0 vs 71.4, centerline 75.2 vs 63.9, width 99.7 = 99.7, anchors 99.5 vs
 99.2, grammar 85.2 vs 85.4 (−0.2, within policy), topology 63.2 vs 59.1,
 finishing 88.0 vs 91.8 (the ledgered debt), fitQuality 62.9 vs 61.6.
-Remaining slices for 92cdd82: clean 96, bold 240 / 480.
+Clean@96, n=400, 92cdd82: **ALL 30.9 vs 33.2 floor** — the branch's known
+clean-96 deficit from the 2026-09-25 veto round (29.2 then; +1.7 this round),
+NOT new: fitQuality 51.9 (50.4 on 09-25, floor 58.1 — veto tangent anchors
+read as corners, needs the smooth-pin plumbing) and finishing 83.6 (floor
+88.5) carry it; everything else is up: pathCount 77.7 vs 70.3, centerline
+77.5 vs 64.5, anchors 99.5 vs 99.2, grammar 84.9 vs 83.4, topology 58.6 vs
+55.5. Still the merge BLOCKER it was.
+Remaining slices for 92cdd82: bold 240 / 480.
