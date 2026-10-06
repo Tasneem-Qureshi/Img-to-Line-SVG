@@ -690,6 +690,14 @@ const LineTracer = (() => {
       return { dir: [dx, dy], base: [mx, my] };
     };
 
+    // nearest point to q on the segment a-b (falls back to q when degenerate)
+    const projectOnChord = (q, a, b) => {
+      const dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy;
+      if (L2 < 1) return q;
+      const t = Math.max(0, Math.min(1, ((q[0] - a[0]) * dx + (q[1] - a[1]) * dy) / L2));
+      return [a[0] + dx * t, a[1] + dy * t];
+    };
+
     let list = chains.slice();
     // corner + spoke pre-pass — must run BEFORE the spur-fuse below: at bold
     // weights a ~1.3w arrowhead barb qualifies as a "spur", and the spur-fuse
@@ -1129,8 +1137,9 @@ const LineTracer = (() => {
           // ring closing at a junction: bridge through the junction center
           const C = list[op.close];
           const t0 = C.trim && C.trim[0], t1 = C.trim && C.trim[1];
-          const seam = t0 && t1 ? [[(t0.p[0] + t1.p[0]) / 2, (t0.p[1] + t1.p[1]) / 2]]
+          let seam = t0 && t1 ? [[(t0.p[0] + t1.p[0]) / 2, (t0.p[1] + t1.p[1]) / 2]]
             : t0 ? [t0.p] : t1 ? [t1.p] : [];
+          if (seam.length) seam = [projectOnChord(seam[0], C.points[C.points.length - 1], C.points[0])];
           list[op.close] = Object.assign({}, C, {
             closed: true,
             points: C.points.concat(seam),
@@ -1148,6 +1157,14 @@ const LineTracer = (() => {
         const trA = A.trim && A.trim[op.a.e], trB = B.trim && B.trim[op.b.e];
         let seam = trA && trB ? [[(trA.p[0] + trB.p[0]) / 2, (trA.p[1] + trB.p[1]) / 2]]
           : trA ? [trA.p] : trB ? [trB.p] : [];
+        // the junction node is the skeleton's branch point, and a ONE-SIDED
+        // joint (a ring passing a pole where two arcs end on the same side,
+        // a stroke passing a T) displaces it toward the extra arms by up to
+        // ~w — seaming a near-straight continuation through it dents the
+        // stroke (the globe's "pole bulge"). Project the node onto the chord
+        // between the two trimmed ends: unchanged for symmetric crossings,
+        // dent-free otherwise. Bent continuations keep the apex probe below.
+        if (seam.length && op.cos < -0.9) seam = [projectOnChord(seam[0], ptsA[ptsA.length - 1], ptsB[0])];
         let seamForced = null;
         // a BENT continuation (a chevron: two arms fused into one wedge of
         // ink) does not pass through the pool centroid — its true apex is at
@@ -1168,10 +1185,38 @@ const LineTracer = (() => {
             let run = 0;
             const maxRun = wA * 4;
             while (run < maxRun && at([s0[0] + bx * (run + 1), s0[1] + by * (run + 1)])) run += 1;
+            // a wedge narrows toward its tip; a CROSSING stroke (a meridian
+            // arc through a latitude line) keeps its width along the probe —
+            // running up it plants the "apex" a width up the other stroke
+            let wedge = true;
             if (run > wA * 0.55 && run < maxRun) {
+              const lat = f => {
+                const x = s0[0] + bx * run * f, y = s0[1] + by * run * f;
+                let p2 = 0, n2 = 0;
+                while (p2 < wA * 2 && at([x - by * (p2 + 1), y + bx * (p2 + 1)])) p2 += 1;
+                while (n2 < wA * 2 && at([x + by * (n2 + 1), y - bx * (n2 + 1)])) n2 += 1;
+                return p2 + n2;
+              };
+              const near2 = lat(0.3), far2 = lat(0.8);
+              wedge = far2 < near2 * 0.6;
+            }
+            if (wedge && run > wA * 0.55 && run < maxRun) {
               const apex = [s0[0] + bx * (run - wA / 2), s0[1] + by * (run - wA / 2)];
-              seam = [apex];
-              seamForced = apex;
+              // the apex must be where the arms' own angle puts it: a bend of
+              // (π − φ) between ends `gap` apart sits (gap/2)·tan(bend/2) off
+              // their chord. A probe that ran down ANOTHER stroke's ink (a
+              // meridian arc leaving the pole) lands far beyond that — the
+              // globe's "pole dent" was exactly such a forced apex 0.9u
+              // inside the ring on a 23° bend.
+              const eA = ptsA[ptsA.length - 1], eB = ptsB[0];
+              const gx = eB[0] - eA[0], gy = eB[1] - eA[1], gap = Math.hypot(gx, gy) || 1;
+              const phi = Math.acos(Math.max(-1, Math.min(1, op.cos)));
+              const expected = (gap / 2) * Math.tan((Math.PI - phi) / 2);
+              const offset = Math.abs(gy * (apex[0] - eA[0]) - gx * (apex[1] - eA[1])) / gap;
+              if (offset <= 1.5 * expected + 0.1 * wA) {
+                seam = [apex];
+                seamForced = apex;
+              }
             }
           }
         }
@@ -1538,13 +1583,71 @@ const LineTracer = (() => {
                                       Math.hypot(pZ[0] - x, pZ[1] - y));
                 if (dEnd < oW * 0.8) continue;
               }
-              return [x, y];
+              // the ray lands where the arm's END TANGENT meets the partner —
+              // for a curved arm (a meridian arc converging on a pole) that
+              // is beside the true foot. The foot is the partner's point
+              // nearest the junction node: search the partner around the
+              // crossing (±1.5w) for it.
+              let best = [x, y], bd = Math.hypot(tr.p[0] - x, tr.p[1] - y);
+              const reach = Math.max(oW, c.width || 2) * 1.5;
+              for (let k3 = Math.max(0, k - 60); k3 + 1 < pts.length && k3 <= k + 60; k3++) {
+                const qx = pts[k3][0], qy = pts[k3][1];
+                if (Math.hypot(qx - x, qy - y) > reach) continue;
+                const d3 = Math.hypot(tr.p[0] - qx, tr.p[1] - qy);
+                if (d3 < bd) { bd = d3; best = [qx, qy]; }
+              }
+              return best;
             }
           }
         }
       }
       return tr.p;
     };
+    // two terminating arms converging on the same pool (a globe's meridian
+    // arcs at a pole) attach, by skeleton, to two nodes a stroke-width apart
+    // and would land beside each other on the through-stroke. Their end
+    // tangents intersect at the authored meeting point: when that lies on a
+    // through-stroke, both arms end at its nearest point (the pole).
+    {
+      const arms = [];
+      for (const c of list) {
+        if (!c.trim || c.closed) continue;
+        for (const e of [0, 1]) {
+          const tr = c.trim[e];
+          if (!tr || tr.apex) continue;
+          const n = c.points.length;
+          const kd = Math.min(n - 1, Math.max(7, Math.round((c.width || 2) * 0.5)));
+          const end = e === 0 ? c.points[0] : c.points[n - 1];
+          const deep = e === 0 ? c.points[kd] : c.points[n - 1 - kd];
+          const dx = end[0] - deep[0], dy = end[1] - deep[1], l = Math.hypot(dx, dy) || 1;
+          arms.push({ c, e, tr, end, dir: [dx / l, dy / l] }); // dir points OUT of the arm, into the pool
+        }
+      }
+      for (let i = 0; i < arms.length; i++) for (let j = i + 1; j < arms.length; j++) {
+        const A = arms[i], B = arms[j];
+        if (A.c === B.c) continue;
+        const wAB = Math.max(A.c.width || 2, B.c.width || 2);
+        if (Math.hypot(A.tr.p[0] - B.tr.p[0], A.tr.p[1] - B.tr.p[1]) > 2.5 * wAB) continue;
+        const det = A.dir[0] * B.dir[1] - A.dir[1] * B.dir[0];
+        if (Math.abs(det) < 0.25) continue; // not converging at a usable angle
+        const t = ((B.end[0] - A.end[0]) * B.dir[1] - (B.end[1] - A.end[1]) * B.dir[0]) / det;
+        const u = ((B.end[0] - A.end[0]) * A.dir[1] - (B.end[1] - A.end[1]) * A.dir[0]) / det;
+        if (t < 0 || u < 0 || t > 3 * wAB || u > 3 * wAB) continue; // must meet ahead of both, nearby
+        const X = [A.end[0] + A.dir[0] * t, A.end[1] + A.dir[1] * t];
+        // the through-stroke: another chain passing within ~0.6w of X
+        let foot = null, bd = 1.2 * wAB; // curved arms' end tangents overshoot the true meeting point by ~0.5w
+        for (const o of list) {
+          if (o === A.c || o === B.c) continue;
+          const pts = o.points;
+          for (let k = 0; k < pts.length; k += 2) {
+            const d = Math.hypot(pts[k][0] - X[0], pts[k][1] - X[1]);
+            if (d < bd) { bd = d; foot = pts[k]; }
+          }
+        }
+        if (!foot) continue;
+        A.tr.apex = foot.slice(); B.tr.apex = foot.slice();
+      }
+    }
     for (const c of list) {
       if (!c.trim) continue;
       if (c.trim[0]) {

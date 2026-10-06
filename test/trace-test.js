@@ -1765,6 +1765,56 @@ console.log('48. arrange (test/failures): arrowhead corner+spoke, shaft through 
   }
 }
 
+console.log('49. globe (test/failures): poles where three strokes converge, arcs meet the ring exactly');
+{
+  // Ground truth (gen-globe.js): circle r=10 at (12,12); latitude lines at
+  // y = 8.8 / 15.2 spanning the ring; a lens of two arcs through the poles
+  // (12,2) and (12,22), half-width 4.6 at the equator. Reported (2026-10-06,
+  // user's globe render): a dent/bulge at the poles — a forced chevron apex
+  // probed down a meridian arc's ink — arcs landing beside the pole, and a
+  // zigzag where a latitude line crosses an arc.
+  const H4 = require(path.join(__dirname, 'corpus-harness', 'harness.js'));
+  const zlib4 = require('zlib');
+  const near4 = (p, x, y, tol) => Math.hypot(p[0] - x, p[1] - y) <= tol;
+  for (const [weight, sw] of [['thin', 0.8], ['bold', 1.3]]) {
+    const raw = zlib4.gunzipSync(fs.readFileSync(path.join(__dirname, 'failures', `globe-${weight}.rgba.gz`)));
+    const w = raw.readUInt32LE(0), h = raw.readUInt32LE(4);
+    const img = { width: w, height: h, data: new Uint8ClampedArray(raw.buffer, raw.byteOffset + 8, w * h * 4) };
+    const res = H4.traceRender(img);
+    const tr = H4.parseTraced(res.svg, res.traceW, 28, -2);
+    check(`globe ${weight}: one weight class`, res.weights.length === 1, `got ${res.weights.length}`);
+    check(`globe ${weight}: 5 paths (ring, 2 arcs, 2 lines)`, tr.subs.length === 5, `got ${tr.subs.length}`);
+    const ring = tr.subs.find(s => s.closed);
+    check(`globe ${weight}: ring is a 4-anchor closed circle through the cardinal points`,
+      !!ring && ring.anchors === 4 &&
+      [[12, 2], [22, 12], [12, 22], [2, 12]].every(([x, y]) => ring.poly.some(p => near4(p, x, y, 0.25))),
+      ring ? `anchors ${ring.anchors}` : 'no closed path');
+    const lines = tr.subs.filter(s => !s.closed && s.anchors === 2);
+    check(`globe ${weight}: two latitude lines, 2-anchor straights at y=8.8 and y=15.2`,
+      lines.length === 2 && lines.every(l => l.cmds.every(c => c.c === 'L')) &&
+      [8.8, 15.2].every(y => lines.some(l => l.poly.every(p => Math.abs(p[1] - y) <= 0.25) &&
+        Math.min(l.poly[0][0], l.poly[l.poly.length - 1][0]) <= 2.9 && Math.max(l.poly[0][0], l.poly[l.poly.length - 1][0]) >= 21.1)),
+      `${lines.length} straight paths: ` + lines.map(l => l.cmds.map(c => c.c).join('')).join(','));
+    const arcs = tr.subs.filter(s => !s.closed && s.anchors === 3);
+    check(`globe ${weight}: two meridian arcs, 3 anchors each, ending AT the poles`,
+      arcs.length === 2 && arcs.every(a => {
+        const e0 = a.poly[0], e1 = a.poly[a.poly.length - 1];
+        return (near4(e0, 12, 2, 0.3) && near4(e1, 12, 22, 0.3)) || (near4(e1, 12, 2, 0.3) && near4(e0, 12, 22, 0.3));
+      }),
+      arcs.map(a => `${a.poly[0].map(v => v.toFixed(1))}..${a.poly[a.poly.length - 1].map(v => v.toFixed(1))}`).join(' | ') || 'none');
+    check(`globe ${weight}: arcs bulge to x=7.4 and x=16.6 at the equator`,
+      [7.4, 16.6].every(x => arcs.some(a => a.poly.some(p => near4(p, x, 12, 0.35)))), 'equator points missing');
+    let worstGap = 1e9;
+    for (const s of tr.subs) {
+      const ap = [s.cmds.length ? s.cmds[0].pts[0] : s.startPt];
+      for (const c of s.cmds) ap.push(c.pts[c.pts.length - 1]);
+      const lim = s.closed ? ap.length - 1 : ap.length;
+      for (let i = 1; i < lim; i++) worstGap = Math.min(worstGap, Math.hypot(ap[i][0] - ap[i - 1][0], ap[i][1] - ap[i - 1][1]));
+    }
+    check(`globe ${weight}: no anchor pair closer than 0.5w`, worstGap >= 0.5 * sw, `min gap ${worstGap.toFixed(2)}`);
+  }
+}
+
 // --- write a sample SVG for eyeballing -------------------------------------
 {
   const img = makeImage(300, 200, WHITE);

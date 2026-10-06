@@ -123,3 +123,38 @@ each other past it). Before merging, run one slice at a time and compare to
 `node test/corpus-harness/harness.js --n 400 --sizes 96` (then 240, 480), and
 `--bold --sizes 240` (then 480). Expect pathCount/topology gains wherever
 icons carry arrowheads; any drop > 1.0 pt or headline drop blocks.
+
+
+## Globe round (2026-10-06, on `bold-weight-v2.5`)
+
+User report from the live site: a globe (ring + two latitude lines + a
+meridian lens) traced with a bulge/dent at the poles, arcs landing beside the
+pole, and a zigzag where a latitude line crosses an arc. Fixture
+`test/failures/gen-globe.js` → `globe-thin` (0.8u) / `globe-bold` (1.3u) +
+`globe.svg`; test 49 (14 checks, both weights). Suite **312/316** — bell-480
+phantom now passes; camera-96, lucide bell, bullhorn handle-end and
+small-wave remain.
+
+Root cause (found by dumping the merged ring's points): the "dent" was a
+FORCED CHEVRON APEX at (12.9,2.9), 0.9u inside the ring. The pair-merge's
+bent-continuation probe (cos −0.97..−0.5) walked the bisector from the seam
+down the ink of a meridian arc leaving the pole and planted the "wedge tip"
+there; the same false apex produced the latitude-line zigzag at the arc
+crossing. Not sagging skeleton points — two attempts to straighten the pole
+link (chord through the nodes, node merging) were wrong and reverted; they
+broke the bullhorn's bottom edge because T-nodes sit off the stroke.
+
+Mechanisms (mergeChains):
+1. **chevron apex consistency**: a bend of (π−φ) between ends `gap` apart puts
+   its tip (gap/2)·tan(bend/2) off their chord; an apex farther than 1.5× that
+   (+0.1w) ran down another stroke's ink and is rejected. Plus a wedge check
+   (ink must narrow along the probe).
+2. **straight-continuation seam** projected onto the chord between the two
+   trimmed ends (the junction node is displaced toward extra arms).
+3. **terminating ends land at the partner's point nearest the junction node**
+   (the ray along a curved arm's end tangent lands beside the true foot).
+4. **converging terminating arms** (two arcs at a pole): end tangents meet at
+   X; if a through-stroke passes within 1.2w of X, both arms end at its
+   nearest point — the pole — via `trim[e].apex`.
+
+Website: the home-page example is now this globe (`web/example.png`).
