@@ -171,3 +171,69 @@ vs 58.1, topology 60.6 vs 55.0, finishing 87.5 vs 85.7, fitQuality 59.8 vs
 54.2). Remaining slices: clean 96 / 480, bold 240 / 480.
 
 Website: the home-page example is now this globe (`web/example.png`).
+
+### Globe round — final (92cdd82, 2026-10-06 evening; live on the site, zip v2.5.6)
+
+User check of the live site (6a86a88): still "not perfect" — a flat seam at the
+top of the lens and the two arcs crossing past the ring at the bottom. The
+browser's input bitmap was captured (page-side replay of getImageData → PNG →
+local receiver) and traced in Node: the skeleton is IDENTICAL to the bicubic
+fixture's, so the pole structure is deterministic; the remaining defects were
+design, not resampling. Mechanism 4 above (extension into the ring with flat
+caps) is REPLACED:
+
+1. **One closed lens, vertex ON the ring, round join** — the authored
+   geometry (an icon set's globe is a path whose pole vertex sits on the rim
+   with a round join; its arcs' inner edges meet (w/2)/sin(φ/2) below the
+   vertex, a small filled wedge under the rim's inner edge that IS the
+   authored look). Both pairing routes end here: converging arms fuse through
+   the foot; a lens the pairing already closed along the ring collapses its
+   shared run to the foot. The raw foot sits ~0.1w inside the true circle
+   (skeleton pulled toward the arcs) and is kept: the fitted rim is pulled
+   the same way, so vertex and rim stay within 0.03–0.08u; a vertex pushed
+   outward bumps (round) or ledges (bevel) the rim silhouette, a miter spikes
+   0.27w.
+2. **Round-join tagging**: the class miter/round probe at a pole runs out
+   through the ring's ink and votes MITER. Joins known round by construction
+   (`roundJoins`) tag their corners: they vote round, are never probed, and
+   when the class still votes miter such chains get their own
+   `stroke-linejoin="round"` path.
+3. **Seam-aware run fusion**: the rim reaches the fit with a ~1.2w single-step
+   chord at each latitude line's T (junction cut + seam). The rounded-corner
+   VETO fit a small circle to that chord and planted tangent anchors → a
+   5-anchor rim with a straight piece to the equator (no circle snap).
+   mergeChains now records straight-continuation `seams` (straightness
+   judged on the strokes' own geometry 1.5w back from each end — the
+   pairing's direction read calls a corner's pool curl straight), and the
+   fusion stage skips a would-be corner X only when it sits within 0.5w of a
+   seam. Skipping any gap that HOLDS a seam shielded the bullhorn's body
+   corners beside the handle's T (bottom edge LCCCCC; bisected) — gaps run up
+   to 3.2w.
+   Tried and reverted: resampling every over-long step before smoothing (all
+   chains) also restored the circle snap — and lifted corpus centerline
+   66.8→72.4 — but cost 6 suite checks (bullhorn edges, face circle, arrange
+   corner: the corner fusion's gap semantics are index-based) and finishing
+   87.7→84.4. A junction-chord-only variant remains a lead for centerline.
+4. **Fixtures**: globe-thin/bold are now the stroke-authored icon (lens vertex
+   on the ring; latitude lines ending ON the ring — the +0.3 "bury" put round
+   caps 0.3u past the rim, visible as bumps on the website example); the
+   filled-notch variants are dropped. Test 49: one closed 4-anchor lens through
+   the equator points, vertices on or just inside the ring at both poles, round
+   joins everywhere, 4-anchor rim, 2-anchor lines, 0.5w anchor spacing.
+
+Suite **328/332** — only the four pre-existing rows fail (camera-96 coverage,
+lucide bell centerline, bullhorn bold handle end, bullhorn bold small wave).
+
+Corpus clean@240, n=400 (same icons, one slice at a time):
+
+| build | ALL | pathCount | centerline | width | anchors | grammar | topology | finishing | fitQuality |
+|---|---|---|---|---|---|---|---|---|---|
+| v2.4 floor (baseline.json) | 30.9 | 65.2 | 58.8 | 99.5 | 99.2 | 84.7 | 55.0 | 90.8 | 58.8 |
+| 6a86a88 extension + flat caps (was live) | 30.2 | 76.2 | 67.0 | 99.7 | 99.5 | 84.7 | 60.9 | 86.4 | 55.0 |
+| 38b9101 fusion (vertex at foot) | 34.8 | 75.2 | 66.8 | 99.7 | 99.5 | 84.7 | 60.6 | 87.5 | 59.8 |
+| densification experiment (reverted) | 34.0 | 75.4 | 72.4 | 99.7 | 99.5 | 84.7 | 60.6 | 84.4 | 59.8 |
+| **92cdd82 final** | **34.8** | 75.2 | 66.8 | 99.7 | 99.5 | 84.9 | 60.6 | 87.7 | 59.8 |
+
+Finishing sits below the v2.4 floor on every build of this branch since the
+2026-09-25 veto round (90.8 → 86–88); it is not new to this round and stays a
+ledgered debt. Remaining slices for 92cdd82: clean 96 / 480, bold 240 / 480.
