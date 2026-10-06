@@ -55,6 +55,10 @@ const extras = `
   <form id="reportForm" name="trace-report" method="POST" data-netlify="true" netlify-honeypot="bot-field" enctype="multipart/form-data">
     <input type="hidden" name="form-name" value="trace-report">
     <input type="hidden" name="stats" id="reportStats">
+    <!-- Netlify only stores fields declared in the HTML at build time: the
+         image and SVG are attached to these at submit time by the shim -->
+    <input type="file" name="source" class="hp" tabindex="-1" aria-hidden="true">
+    <input type="file" name="svg" class="hp" tabindex="-1" aria-hidden="true">
     <p class="hp"><label>Leave this empty <input name="bot-field"></label></p>
     <label class="field">What went wrong? <span>(optional)</span>
       <textarea name="note" rows="3" placeholder="e.g. the arrowhead came out rounded, the dashed line got merged…"></textarea>
