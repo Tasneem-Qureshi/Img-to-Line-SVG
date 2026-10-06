@@ -1765,49 +1765,56 @@ console.log('48. arrange (test/failures): arrowhead corner+spoke, shaft through 
   }
 }
 
-console.log('49. globe (test/failures): poles where three strokes converge, arcs meet the ring exactly');
+console.log('49. globe (test/failures): poles where three strokes converge — one closed lens, round-joined');
 {
   // Ground truth (gen-globe.js): circle r=10 at (12,12); latitude lines at
-  // y = 8.8 / 15.2 spanning the ring; a lens of two arcs through the poles
-  // (12,2) and (12,22), half-width 4.6 at the equator. Reported (2026-10-06,
-  // user's globe render): a dent/bulge at the poles — a forced chevron apex
-  // probed down a meridian arc's ink — arcs landing beside the pole, and a
-  // zigzag where a latitude line crosses an arc.
+  // y = 8.8 / 15.2 ending ON the ring; a lens of two arcs through the poles
+  // (12,2)/(12,22), half-width 4.6 at the equator — stroke-authored, as icon
+  // sets draw a globe: the lens is ONE closed path whose vertices sit on the
+  // ring with round joins (its arcs' inner edges meet (w/2)/sin(φ/2) below).
+  // Reported (2026-10-06): pole bulge (a forced chevron apex), arcs landing
+  // beside the pole, a line/arc crossing zigzag, "not connected at the top";
+  // then (live site) a flat seam at the top and the arcs crossing past the
+  // ring at the bottom: separate arc ends at the poles — the two routes the
+  // pairing can take there (resampling coin flip) must both end in the lens.
   const H4 = require(path.join(__dirname, 'corpus-harness', 'harness.js'));
   const zlib4 = require('zlib');
   const near4 = (p, x, y, tol) => Math.hypot(p[0] - x, p[1] - y) <= tol;
-  for (const [weight, sw] of [['thin', 0.8], ['bold', 1.3]]) {
-    const raw = zlib4.gunzipSync(fs.readFileSync(path.join(__dirname, 'failures', `globe-${weight}.rgba.gz`)));
+  for (const [variant, sw] of [['thin', 0.8], ['bold', 1.3]]) {
+    const raw = zlib4.gunzipSync(fs.readFileSync(path.join(__dirname, 'failures', `globe-${variant}.rgba.gz`)));
     const w = raw.readUInt32LE(0), h = raw.readUInt32LE(4);
     const img = { width: w, height: h, data: new Uint8ClampedArray(raw.buffer, raw.byteOffset + 8, w * h * 4) };
     const res = H4.traceRender(img);
     const tr = H4.parseTraced(res.svg, res.traceW, 28, -2);
-    check(`globe ${weight}: one weight class`, res.weights.length === 1, `got ${res.weights.length}`);
-    check(`globe ${weight}: 5 paths (ring, 2 arcs, 2 lines)`, tr.subs.length === 5, `got ${tr.subs.length}`);
-    const ring = tr.subs.find(s => s.closed);
-    check(`globe ${weight}: ring is a 4-anchor closed circle through the cardinal points`,
+    check(`globe ${variant}: one weight class`, res.weights.length === 1, `got ${res.weights.length}`);
+    check(`globe ${variant}: 4 paths (ring, lens, 2 lines)`, tr.subs.length === 4, `got ${tr.subs.length}`);
+    const ring = tr.subs.find(s => s.closed && s.poly.some(p => near4(p, 2, 12, 0.4)));
+    check(`globe ${variant}: ring is a 4-anchor closed circle through the cardinal points`,
       !!ring && ring.anchors === 4 &&
       [[12, 2], [22, 12], [12, 22], [2, 12]].every(([x, y]) => ring.poly.some(p => near4(p, x, y, 0.25))),
-      ring ? `anchors ${ring.anchors}` : 'no closed path');
-    // the meridian arcs end at the poles, pushed up to 0.45w INTO the ring so
-    // their inner edges meet at the ring's inner edge (no notch) — never short
-    const arcs = tr.subs.filter(s => !s.closed && s.anchors === 3);
-    check(`globe ${weight}: two meridian arcs, 3 anchors each, ending at the poles (into the ring, never short)`,
-      arcs.length === 2 && arcs.every(a => {
-        const e0 = a.poly[0], e1 = a.poly[a.poly.length - 1];
-        const top = e0[1] < e1[1] ? e0 : e1, bot = e0[1] < e1[1] ? e1 : e0;
-        return Math.abs(top[0] - 12) <= 0.3 && top[1] <= 2.15 && top[1] >= 2 - 0.5 * sw &&
-               Math.abs(bot[0] - 12) <= 0.3 && bot[1] >= 21.85 && bot[1] <= 22 + 0.5 * sw;
-      }),
-      arcs.map(a => `${a.poly[0].map(v => v.toFixed(1))}..${a.poly[a.poly.length - 1].map(v => v.toFixed(1))}`).join(' | ') || 'none');
-    check(`globe ${weight}: arcs bulge to x=7.4 and x=16.6 at the equator`,
-      [7.4, 16.6].every(x => arcs.some(a => a.poly.some(p => near4(p, x, 12, 0.35)))), 'equator points missing');
+      ring ? `anchors ${ring.anchors}: ` + ring.cmds.map(c => c.c + '(' + c.pts[c.pts.length - 1].map(v => v.toFixed(1)) + ')').join(' ') : 'no ring');
     const lines = tr.subs.filter(s => !s.closed && s.anchors === 2);
-    check(`globe ${weight}: two latitude lines, 2-anchor straights at y=8.8 and y=15.2`,
+    check(`globe ${variant}: two latitude lines, 2-anchor straights at y=8.8 and y=15.2`,
       lines.length === 2 && lines.every(l => l.cmds.every(c => c.c === 'L')) &&
       [8.8, 15.2].every(y => lines.some(l => l.poly.every(p => Math.abs(p[1] - y) <= 0.25) &&
         Math.min(l.poly[0][0], l.poly[l.poly.length - 1][0]) <= 2.9 && Math.max(l.poly[0][0], l.poly[l.poly.length - 1][0]) >= 21.1)),
       `${lines.length} straight paths: ` + lines.map(l => l.cmds.map(c => c.c).join('')).join(','));
+    const lens = tr.subs.find(s => s.closed && s !== ring);
+    check(`globe ${variant}: lens is ONE closed 4-anchor path through the equator points`,
+      !!lens && lens.anchors === 4 && [[7.4, 12], [16.6, 12]].every(([x, y]) => lens.poly.some(p => near4(p, x, y, 0.35))),
+      lens ? `anchors ${lens.anchors}` : 'no lens');
+    // the pole vertices sit ON the ring — never outside it (a vertex pushed
+    // past the ring's centerline renders a bump on its silhouette)
+    const poleOk = y => lens && lens.poly.some(p => Math.abs(p[0] - 12) <= 0.25 && Math.abs(p[1] - y) <= 0.3 &&
+      (y === 2 ? p[1] >= 2 - 0.05 : p[1] <= 22 + 0.05));
+    check(`globe ${variant}: lens vertices at the poles (12,2) and (12,22), on or just inside the ring`,
+      poleOk(2) && poleOk(22),
+      lens ? lens.poly.filter(p => Math.abs(p[0] - 12) < 1).map(p => '(' + p.map(v => v.toFixed(2)) + ')').join(' ') : 'no lens');
+    // authored joins: round everywhere (a miter at a pole spikes 0.27w past
+    // the ring; a bevel there sits as a flat ledge on its silhouette)
+    check(`globe ${variant}: every path renders with round joins`,
+      /stroke-linejoin="round"/.test(res.svg) && !/stroke-linejoin="(miter|bevel)"/.test(res.svg),
+      (res.svg.match(/stroke-linejoin="[a-z]+"/g) || []).join(' '));
     let worstGap = 1e9;
     for (const s of tr.subs) {
       const ap = [s.cmds.length ? s.cmds[0].pts[0] : s.startPt];
@@ -1815,7 +1822,7 @@ console.log('49. globe (test/failures): poles where three strokes converge, arcs
       const lim = s.closed ? ap.length - 1 : ap.length;
       for (let i = 1; i < lim; i++) worstGap = Math.min(worstGap, Math.hypot(ap[i][0] - ap[i - 1][0], ap[i][1] - ap[i - 1][1]));
     }
-    check(`globe ${weight}: no anchor pair closer than 0.5w`, worstGap >= 0.5 * sw, `min gap ${worstGap.toFixed(2)}`);
+    check(`globe ${variant}: no anchor pair closer than 0.5w`, worstGap >= 0.5 * sw, `min gap ${worstGap.toFixed(2)}`);
   }
 }
 

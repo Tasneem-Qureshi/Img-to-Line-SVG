@@ -1324,8 +1324,17 @@ const LineTracer = (() => {
           let seam = t0 && t1 ? [[(t0.p[0] + t1.p[0]) / 2, (t0.p[1] + t1.p[1]) / 2]]
             : t0 ? [t0.p] : t1 ? [t1.p] : [];
           if (seam.length) seam = [projectOnChord(seam[0], C.points[C.points.length - 1], C.points[0])];
+          let straightC = false; // the ring runs straight on through the junction? (see straightSeam)
+          if (seam.length) {
+            const cp = C.points, kS = Math.max(3, Math.round(1.5 * (C.width || 2)));
+            const e = cp[cp.length - 1], eb = cp[Math.max(0, cp.length - 1 - kS)], s0 = cp[0], sf = cp[Math.min(cp.length - 1, kS)];
+            const ax = e[0] - eb[0], ay = e[1] - eb[1], al = Math.hypot(ax, ay) || 1;
+            const bx = s0[0] - sf[0], by = s0[1] - sf[1], bl = Math.hypot(bx, by) || 1;
+            straightC = (ax * bx + ay * by) / (al * bl) < -0.85;
+          }
           list[op.close] = Object.assign({}, C, {
             closed: true,
+            seams: (C.seams || []).concat(straightC ? seam : []),
             points: C.points.concat(seam),
             trim: [null, null]
           });
@@ -1406,9 +1415,25 @@ const LineTracer = (() => {
         }
         const gap = Math.hypot(ptsB[0][0] - ptsA[ptsA.length - 1][0], ptsB[0][1] - ptsA[ptsA.length - 1][1]);
         const ew = ch => ch.endWidths || [ch.width || 1, ch.width || 1];
+        // a seam where ONE stroke continues straight through a junction (a
+        // ring passing a latitude line's T, an arc crossing a line) is
+        // recorded for the fit stage, which must not read the trimmed chord
+        // there as a corner. Straightness is judged on the strokes' own
+        // geometry ~1.5w back from each end (turn < ~32°): the pairing's
+        // direction read can call a corner's pool curl a continuation
+        let straightSeam = false;
+        if (seam.length && !seamForced) {
+          const kS = Math.max(3, Math.round(1.5 * Math.max(A.width || 2, B.width || 2)));
+          const aEnd = ptsA[ptsA.length - 1], aBack = ptsA[Math.max(0, ptsA.length - 1 - kS)];
+          const bStart = ptsB[0], bFwd = ptsB[Math.min(ptsB.length - 1, kS)];
+          const ax = aEnd[0] - aBack[0], ay = aEnd[1] - aBack[1], al = Math.hypot(ax, ay) || 1; // into the pool
+          const bx = bStart[0] - bFwd[0], by = bStart[1] - bFwd[1], bl = Math.hypot(bx, by) || 1; // into the pool
+          straightSeam = (ax * bx + ay * by) / (al * bl) < -0.85;
+        }
         added.push({
           closed: false,
           forced: (A.forced || []).concat(B.forced || [], seamForced ? [seamForced] : []),
+          seams: (A.seams || []).concat(B.seams || [], straightSeam ? seam : []),
           points: ptsA.concat(seam, ptsB),
           width: ((A.width || 1) * lenA + (B.width || 1) * lenB) / ((lenA + lenB) || 1),
           geomLength: lenA + lenB + gap,
@@ -1787,6 +1812,110 @@ const LineTracer = (() => {
       }
       return tr.p;
     };
+    // fuse two arms into one chain through `apex` (forced corner); when both
+    // ends of one chain converge, it closes (a lens)
+    const fuseArms = (A, B, apex, round) => {
+      const a = A.c, b = B.c;
+      if (a === b) {
+        a.points = a.points.concat([apex]);
+        a.closed = true;
+        a.forced = (a.forced || []).concat([apex]);
+        a.trim = [null, null];
+        if (round) a.roundJoins = (a.roundJoins || []).concat([apex]);
+        return;
+      }
+      const ptsA = A.e === 1 ? a.points.slice() : a.points.slice().reverse(); // ends at the pool
+      const ptsB = B.e === 0 ? b.points.slice() : b.points.slice().reverse(); // starts at the pool
+      const lenA = a.geomLength != null ? a.geomLength : a.points.length;
+      const lenB = b.geomLength != null ? b.geomLength : b.points.length;
+      const ew = ch => ch.endWidths || [ch.width || 1, ch.width || 1];
+      list = list.filter(c => c !== a && c !== b);
+      list.push({
+        closed: false,
+        // joins known to be round (a vertex buried in a through-stroke, where
+        // no ink probe can classify it) — the fit tags these corners
+        roundJoins: (a.roundJoins || []).concat(b.roundJoins || [], round ? [apex] : []),
+        seams: (a.seams || []).concat(b.seams || []),
+        forced: (a.forced || []).concat(b.forced || [], [apex]),
+        points: ptsA.concat([apex], ptsB),
+        width: ((a.width || 1) * lenA + (b.width || 1) * lenB) / ((lenA + lenB) || 1),
+        geomLength: lenA + lenB +
+          Math.hypot(apex[0] - ptsA[ptsA.length - 1][0], apex[1] - ptsA[ptsA.length - 1][1]) +
+          Math.hypot(ptsB[0][0] - apex[0], ptsB[0][1] - apex[1]),
+        endDeg: [A.e === 1 ? a.endDeg[0] : a.endDeg[1], B.e === 0 ? b.endDeg[1] : b.endDeg[0]],
+        endWidths: [A.e === 1 ? ew(a)[0] : ew(a)[1], B.e === 0 ? ew(b)[1] : ew(b)[0]],
+        caps: [A.e === 1 ? (a.caps || [])[0] : (a.caps || [])[1], B.e === 0 ? (b.caps || [])[1] : (b.caps || [])[0]],
+        trim: [a.trim ? a.trim[1 - A.e] : null, b.trim ? b.trim[1 - B.e] : null]
+      });
+    };
+    // POLES the pairing already closed: when a pole's short link went to the
+    // meridian arcs instead of the ring (which partner wins is a resampling
+    // coin flip), the lens closes as one chain that RUNS ALONG the ring for
+    // the link's length. Find such shared runs on closed chains and collapse
+    // each to one vertex ON the stroke — the same authored lens the
+    // converging-arms fuse below builds when the link went to the ring.
+    {
+      const closedList = list.filter(c => c.closed && c.points.length > 40);
+      for (const L of closedList) {
+        if (!list.includes(L)) continue;
+        const wL = L.width || 2, LP = L.points, n = LP.length;
+        for (const T of list) {
+          if (T === L || T.points.length < 40 || !list.includes(L)) continue;
+          const tp = T.points, tol = 0.3 * Math.max(wL, T.width || 2), cell = Math.max(4, Math.round(tol));
+          const grid = new Map();
+          for (let k = 0; k < tp.length; k += 2) {
+            const key = ((tp[k][0] / cell) | 0) * 65536 + ((tp[k][1] / cell) | 0);
+            let arr = grid.get(key); if (!arr) grid.set(key, arr = []); arr.push(k);
+          }
+          const nearIdx = p => {
+            const gx = (p[0] / cell) | 0, gy = (p[1] / cell) | 0;
+            for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+              const arr = grid.get((gx + dx) * 65536 + (gy + dy));
+              if (!arr) continue;
+              for (const k of arr) if (Math.hypot(tp[k][0] - p[0], tp[k][1] - p[1]) <= tol) return k;
+            }
+            return -1;
+          };
+          const near = new Uint8Array(n);
+          let total = 0;
+          for (let i = 0; i < n; i++) { near[i] = nearIdx(LP[i]) >= 0 ? 1 : 0; total += near[i]; }
+          if (!total || total > n * 0.5) continue; // no overlap, or the same shape twice
+          const s0 = near.indexOf(0);
+          const runs = [];
+          let start = -1;
+          for (let step = 0; step < n; step++) {
+            const i = (s0 + step) % n;
+            if (near[i] && start < 0) start = i;
+            if (!near[i] && start >= 0) { runs.push([start, (i - 1 + n) % n]); start = -1; }
+          }
+          if (start >= 0) runs.push([start, (s0 - 1 + n) % n]);
+          const arcLen = (i0, i1) => { let len = 0; for (let i = i0; i !== i1; i = (i + 1) % n) len += Math.hypot(LP[(i + 1) % n][0] - LP[i][0], LP[(i + 1) % n][1] - LP[i][1]); return len; };
+          const poleRuns = runs.filter(r => { const len = arcLen(r[0], r[1]); return len >= 0.5 * wL && len <= 3 * wL; });
+          if (!poleRuns.length || poleRuns.length > 2) continue;
+          // resolve each run to its foot on T (the pole)
+          const res = poleRuns.map(r => {
+            const count = ((r[1] - r[0] + n) % n) + 1;
+            const mid = LP[(r[0] + (count >> 1)) % n];
+            const k = nearIdx(mid);
+            const foot = k >= 0 ? tp[k].slice() : mid.slice();
+            return { r, foot };
+          });
+          const vertexOf = x => x.foot.slice(); // the pole: ON the through-stroke
+          const drop = new Uint8Array(n);
+          for (const x of res) for (let i = x.r[0]; ; i = (i + 1) % n) { drop[i] = 1; if (i === x.r[1]) break; }
+          const pts = [];
+          for (let i = 0; i < n; i++) {
+            if (!drop[i]) { pts.push(LP[i]); continue; }
+            const x = res.find(y => y.r[0] === i);
+            if (x) pts.push(vertexOf(x));
+          }
+          L.points = pts;
+          L.forced = (L.forced || []).concat(res.map(vertexOf));
+          L.roundJoins = (L.roundJoins || []).concat(res.map(vertexOf));
+          break; // L resolved against T
+        }
+      }
+    }
     // two terminating arms converging on the same pool (a globe's meridian
     // arcs at a pole) attach, by skeleton, to two nodes a stroke-width apart
     // and would end beside each other on the through-stroke. Their end
@@ -1845,29 +1974,21 @@ const LineTracer = (() => {
           }
         }
         if (!foot) continue;
-        // Where should the two arms end? ON the through-stroke's centerline
-        // their inner edges cross a little inside it and leave a notch (the
-        // lens "not connected at the top"); authored icons push the arms
-        // INTO the stroke until the inner edges meet at its inner edge. For
-        // arms meeting at interior angle φ with half-width w/2 that is
-        // (w/2)(1/sin(φ/2) − 1) beyond the centerline, along the outward
-        // normal (toward X). Flat caps there stay hidden in the stroke's
-        // ink; a joined vertex would bump outward by the same amount, so the
-        // arms stay separate paths.
-        const cosPhi = Math.max(-1, Math.min(1, A.dir[0] * B.dir[0] + A.dir[1] * B.dir[1]));
-        const half = Math.acos(cosPhi) / 2;
-        const dOut = Math.min(0.45 * wAB, (wAB / 2) * (1 / Math.max(0.2, Math.sin(half)) - 1));
-        const nx = X[0] - foot[0], ny = X[1] - foot[1], nl = Math.hypot(nx, ny) || 1;
-        const apex = [foot[0] + nx / nl * dOut, foot[1] + ny / nl * dOut];
-        A.tr.apex = apex.slice(); B.tr.apex = apex.slice();
-        fused = true; // re-collect: these ends are now resolved
+        // fuse the arms into one path — the authored lens — with its vertex
+        // ON the through-stroke's centerline and a ROUND join there, exactly
+        // as icon sets draw it: the arms' inner edges meet (w/2)/sin(φ/2)
+        // below the vertex (a small filled wedge under the ring's inner edge,
+        // the authored look) and nothing crosses the ring's silhouette. A
+        // vertex pushed outward bumps the silhouette (round) or ledges it
+        // (bevel); a miter join here would spike 0.27w past the ring
+        fuseArms(A, B, foot.slice(), true);
+        fused = true;
       }
       if (!fused) break;
     }
     for (const c of list) {
       if (!c.trim) continue;
       if (c.trim[0]) {
-        if (c.trim[0].apex) (c.poleEnd = c.poleEnd || [false, false])[0] = true;
         const q = extTarget(c, 0, c.trim[0]);
         c.geomLength = (c.geomLength || c.points.length) +
           Math.hypot(q[0] - c.points[0][0], q[1] - c.points[0][1]);
@@ -1876,7 +1997,6 @@ const LineTracer = (() => {
       }
       if (c.trim[1]) {
         const last = c.points[c.points.length - 1];
-        if (c.trim[1].apex) (c.poleEnd = c.poleEnd || [false, false])[1] = true;
         const q = extTarget(c, 1, c.trim[1]);
         c.geomLength = (c.geomLength || c.points.length) +
           Math.hypot(q[0] - last[0], q[1] - last[1]);
@@ -2272,7 +2392,7 @@ const LineTracer = (() => {
 
   // Full chain -> few cubic segments. Splits at real corners (sharp turns)
   // so an "L" stays sharp while arcs become single flowing curves.
-  function fitChain(points, closed, tol, cornersOut, forcedPts, inkCtx, strokeW) {
+  function fitChain(points, closed, tol, cornersOut, forcedPts, inkCtx, strokeW, roundPts) {
     const SW = Math.max(2, strokeW || tol / 0.35);
     const extremePts = []; // extreme anchors are a convention, not fit error
     const pts = [];
@@ -2685,7 +2805,11 @@ const LineTracer = (() => {
         const a = closed ? pts[(ci - w + n) % n] : pts[Math.max(0, ci - w)];
         const b = pts[ci];
         const c2 = closed ? pts[(ci + w) % n] : pts[Math.min(n - 1, ci + w)];
-        cornersOut.push({ p: b, u: V.norm(V.sub(b, a)), v: V.norm(V.sub(c2, b)) });
+        // a corner at a join known to be round (a lens vertex buried in a
+        // ring) is tagged: the ink probe would read the ring's ink as a
+        // miter tip
+        const round = !!(roundPts && roundPts.some(q => Math.hypot(q[0] - b[0], q[1] - b[1]) <= Math.max(2, tol)));
+        cornersOut.push({ p: b, u: V.norm(V.sub(b, a)), v: V.norm(V.sub(c2, b)), round });
       }
     }
 
@@ -2777,7 +2901,7 @@ const LineTracer = (() => {
     if (n === 0) return '';
     if (n === 1) return `M ${fmt(p[0][0])} ${fmt(p[0][1])} l 0.01 0`;
     if (smooth && n >= 3) {
-      const segs = fitChain(p, !!chain.closed, tol || 1.5, cornersOut, chain.forcedPts, inkCtx, chain.fitW || chain.width);
+      const segs = fitChain(p, !!chain.closed, tol || 1.5, cornersOut, chain.forcedPts, inkCtx, chain.fitW || chain.width, chain.roundPts);
       if (segs.length) {
         const start = segs[0].line ? segs[0].line[0] : segs[0][0];
         let d = `M ${fmt(start[0])} ${fmt(start[1])}`;
@@ -3263,6 +3387,30 @@ const LineTracer = (() => {
               if (pf && lineDev(R, pf) > devLim &&
                   !nearForced(pts[R[1]], wEff * 0.5)) fitForced.push(pts[R[1]]);
             }
+            // a gap holding a merge SEAM is one stroke continuing straight
+            // through a junction (a ring passing a latitude line's T, a lens
+            // arc crossing a line): neither a corner to fuse nor an authored
+            // rounded corner to anchor. Left in, the T-seam chord inside an
+            // arc fits a small circle and the veto plants tangent anchors at
+            // its ends — which cost a globe's rim its circle snap.
+            const seamAt = (e1, s2, X) => {
+              if (!c.seams || !c.seams.length) return false;
+              const tolS = Math.max(3, 0.35 * wEff);
+              for (const sp of c.seams) {
+                // the corner the runs would build must BE the seam: a straight
+                // seam a width away from a genuine corner (a handle's T beside
+                // a body corner) must not shield that corner
+                if (Math.hypot(sp[0] - X[0], sp[1] - X[1]) > 0.5 * wEff) continue;
+                for (let k2 = e1; k2 < s2; k2++) {
+                  const a2 = pts[k2 % nP], b2 = pts[(k2 + 1) % nP];
+                  const vx = b2[0] - a2[0], vy = b2[1] - a2[1], L2 = vx * vx + vy * vy;
+                  let t2 = L2 > 0 ? ((sp[0] - a2[0]) * vx + (sp[1] - a2[1]) * vy) / L2 : 0;
+                  t2 = Math.max(0, Math.min(1, t2));
+                  if (Math.hypot(sp[0] - a2[0] - vx * t2, sp[1] - a2[1] - vy * t2) <= tolS) return true;
+                }
+              }
+              return false;
+            };
             const inject = []; // {at: index after which X goes, upto: resume index, X}
             const pairs2 = [];
             for (let m2 = 0; m2 + 1 < runs.length; m2++) pairs2.push([runs[m2], runs[m2 + 1], false]);
@@ -3301,6 +3449,7 @@ const LineTracer = (() => {
               const dx = A2m[0] - B1[0], dy = A2m[1] - B1[1];
               const t = (dx * u2y - dy * u2x) / det;
               const X = [B1[0] + t * u1x, B1[1] + t * u1y];
+              if (seamAt(e1, s2, X)) continue;
               // rounded-corner veto: maxGap scales with stroke width, and at
               // bold weights it grows past the icon's own corner radii — a
               // whole AUTHORED rounded corner then qualifies as a "gap" and
@@ -3462,7 +3611,8 @@ const LineTracer = (() => {
           points: pts,
           fitTol: Math.max(0.75, eps),
           fitW: wEff,
-          forcedPts: fitForced
+          forcedPts: fitForced,
+          roundPts: c.roundJoins
         };
       } else {
         s = simplifyChain(c, eps);
@@ -3496,11 +3646,11 @@ const LineTracer = (() => {
       for (const c of chainList) (c.points.length === 1 ? dots : lines).push(c);
       const corners = [];
       const inkCtx = o.ink ? { ink: o.ink, w, h } : null;
-      const d = lines.map(c => chainToPathData(c, o.smooth, c.fitTol, corners, inkCtx)).join(' ');
+      const parts = lines.map(c => ({ c, d: chainToPathData(c, o.smooth, c.fitTol, corners, inkCtx) }));
       // per-end cap classification, one entry per subpath in d's order
       // (r=round, b=butt, x=unknown, z=closed) — machine-readable finishing
-      const capStr = lines.map(c => c.closed ? 'z:z'
-        : ((c.caps && c.caps[0] || 'x')[0]) + ':' + ((c.caps && c.caps[1] || 'x')[0])).join(' ');
+      const capOf = c => c.closed ? 'z:z'
+        : ((c.caps && c.caps[0] || 'x')[0]) + ':' + ((c.caps && c.caps[1] || 'x')[0]);
       let rc = 0, bc = 0;
       for (const c of chainList) if (c.caps)
         for (const cap of c.caps) {
@@ -3524,6 +3674,10 @@ const LineTracer = (() => {
         const rot = (d, a) => [d[0] * Math.cos(a) - d[1] * Math.sin(a),
                                d[0] * Math.sin(a) + d[1] * Math.cos(a)];
         for (const cr of corners) {
+          // a join known to be round by construction (a vertex buried in a
+          // through-stroke) votes round — the probe below would run out
+          // through the other stroke's ink and read a miter tip
+          if (cr.round) { rj++; continue; }
           // a miter tip juts out along the outer bisector to (w/2)/cos(t/2)
           // for a turn of t, while a round join stops at w/2 in every
           // outward direction — measure the bisector run and compare it to
@@ -3559,13 +3713,21 @@ const LineTracer = (() => {
           else rj++;
         }
       }
+      const join = mj > rj ? 'miter' : 'round';
+      // chains with joins known to be round must not inherit a miter class
+      // join (a lens vertex on a ring would spike past it): they get their
+      // own round-joined path when the class voted miter
+      const own = x => join !== 'round' && x.c.roundPts && x.c.roundPts.length;
+      const main = parts.filter(x => !own(x)), rnd = parts.filter(own);
       return {
-        d,
-        capStr,
+        d: main.map(x => x.d).join(' '),
+        dRound: rnd.map(x => x.d).join(' '),
+        capStr: main.map(x => capOf(x.c)).join(' '),
+        capStrRound: rnd.map(x => capOf(x.c)).join(' '),
         dotD: dots.map(c => chainToPathData(c, o.smooth, c.fitTol)).join(' '),
         width: outWidth,
         cap: bc > rc ? 'butt' : 'round',
-        join: mj > rj ? 'miter' : 'round'
+        join
       };
     };
     const fills = kept.filter(c => c.filled);
@@ -3594,6 +3756,8 @@ const LineTracer = (() => {
       let out = '';
       if (p.d) out += `<path d="${p.d}" fill="none" stroke="${o.stroke}" stroke-width="${sw}" ` +
         `stroke-linecap="${p.cap}" stroke-linejoin="${p.join}" data-caps="${p.capStr || ''}"/>`;
+      if (p.dRound) out += `<path d="${p.dRound}" fill="none" stroke="${o.stroke}" stroke-width="${sw}" ` +
+        `stroke-linecap="${p.cap}" stroke-linejoin="round" data-caps="${p.capStrRound || ''}"/>`;
       // dots need round caps to render, whatever the class voted
       if (p.dotD) out += `<path d="${p.dotD}" fill="none" stroke="${o.stroke}" stroke-width="${sw}" ` +
         `stroke-linecap="round" stroke-linejoin="round"/>`;
@@ -3607,7 +3771,8 @@ const LineTracer = (() => {
       pathCount: kept.length,
       // anchor points in the final geometry (M/C/L commands), not raw samples
       pointCount: paths.reduce((s, p) =>
-        s + (p.d.match(/[MCL]/g) || []).length + (p.dotD.match(/M/g) || []).length, 0),
+        s + (p.d.match(/[MCL]/g) || []).length + ((p.dRound || '').match(/[MCL]/g) || []).length +
+        (p.dotD.match(/M/g) || []).length, 0),
       weights: paths.filter(p => !p.filled).map(p => Math.round(p.width * 100) / 100)
     };
   }
@@ -4226,10 +4391,6 @@ const LineTracer = (() => {
     for (const c of chains) {
       if (c.closed || c.points.length < 3 || !c.endDeg) continue;
       c.caps = [null, null];
-      // an end resolved to a pole apex (two arms converging on a through-
-      // stroke) was pushed INTO that stroke's ink: a flat cap stays hidden
-      // there, a round one bumps out past the stroke's edge
-      if (c.poleEnd) for (const e of [0, 1]) if (c.poleEnd[e]) c.caps[e] = 'butt';
       // strokes shorter than ~1.5x their width: no room to measure a
       // terminal tangent at all — keep the provable minimum (round caps).
       // Longer short strokes ARE probed: with width-windowed terminal

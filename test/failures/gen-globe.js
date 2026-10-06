@@ -20,19 +20,36 @@ const arcPts = (cx, cy, r, a0, a1, n) => {
   for (let i = 0; i <= n; i++) { const a = a0 + (a1 - a0) * i / n; out.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]); }
   return out;
 };
-const shapes = () => {
+// fillNotch (not used by the fixtures): push each lens arc past the pole
+// along its end tangent. The fixtures are the stroke-authored icon — lens
+// vertex ON the ring's centerline with round joins, exactly as icon sets draw
+// a globe; its arcs' inner edges meet (w/2)/sin(φ/2) below the vertex.
+const shapes = (W, fillNotch) => {
   const ring = arcPts(CX, CY, R, 0, 2 * Math.PI, 720);
-  const half = Math.sqrt(R * R - LAT * LAT) + 0.3; // bury the line ends in the ring
+  const half = Math.sqrt(R * R - LAT * LAT); // line ends ON the ring's centerline, as authored
   const lat1 = [[CX - half, CY - LAT], [CX + half, CY - LAT]];
   const lat2 = [[CX - half, CY + LAT], [CX + half, CY + LAT]];
   // right-bulging arc: center left of the globe; sweep through angle 0
   const th = Math.atan2(R, ACX);
-  const right = arcPts(CX - ACX, CY, AR, -th, th, 360);
-  const left = arcPts(CX + ACX, CY, AR, Math.PI - th, Math.PI + th, 360);
+  let right = arcPts(CX - ACX, CY, AR, -th, th, 360);
+  let left = arcPts(CX + ACX, CY, AR, Math.PI - th, Math.PI + th, 360);
+  if (fillNotch) {
+    // tangent at the pole makes atan2(R, ACX) with the vertical: the two arcs
+    // meet at 2·that; extend by (W/2)(1/sin(half) − 1) plus a little
+    const half = Math.atan2(R, ACX);
+    const ext = (W / 2) * (1 / Math.sin(half) - 1) * 1.3 + 0.05;
+    const extend = pts => {
+      const a = pts[0], a2 = pts[1], b = pts[pts.length - 1], b2 = pts[pts.length - 2];
+      const ua = [a[0] - a2[0], a[1] - a2[1]], la = Math.hypot(ua[0], ua[1]);
+      const ub = [b[0] - b2[0], b[1] - b2[1]], lb = Math.hypot(ub[0], ub[1]);
+      return [[a[0] + ua[0] / la * ext, a[1] + ua[1] / la * ext]].concat(pts, [[b[0] + ub[0] / lb * ext, b[1] + ub[1] / lb * ext]]);
+    };
+    right = extend(right); left = extend(left);
+  }
   return { ring, lat1, lat2, right, left };
 };
 
-function render(W, out) {
+function render(W, out, fillNotch) {
   const big = new Uint8Array(SS * SS);
   const r = W / 2 * k;
   const stamp = (x, y) => {
@@ -48,7 +65,7 @@ function render(W, out) {
       for (let j = 0; j <= n; j++) stamp(ax + (bx - ax) * j / n, ay + (by - ay) * j / n);
     }
   };
-  const sh = shapes();
+  const sh = shapes(W, fillNotch);
   for (const p of Object.values(sh)) stroke(p);
   const img = new Uint8ClampedArray(S * S * 4).fill(255);
   for (let y = 0; y < S; y++)
@@ -63,8 +80,8 @@ function render(W, out) {
   Buffer.from(img.buffer).copy(buf, 8);
   fs.writeFileSync(path.join(__dirname, out), zlib.gzipSync(buf));
 }
-render(0.8, 'globe-thin.rgba.gz');
-render(1.3, 'globe-bold.rgba.gz');
+render(0.8, 'globe-thin.rgba.gz', false);   // stroke-authored: lens vertex ON the ring, round joins
+render(1.3, 'globe-bold.rgba.gz', false);   // (website example)
 const th = Math.atan2(R, ACX);
 const f = v => +v.toFixed(3);
 fs.writeFileSync(path.join(__dirname, 'globe.svg'),
@@ -74,4 +91,4 @@ fs.writeFileSync(path.join(__dirname, 'globe.svg'),
 <path d="M${CX} ${CY - R}A${f(AR)} ${f(AR)} 0 0 1 ${CX} ${CY + R}A${f(AR)} ${f(AR)} 0 0 1 ${CX} ${CY - R}Z" stroke="black" stroke-width="0.8"/>
 </svg>
 `);
-console.log('wrote globe-thin.rgba.gz, globe-bold.rgba.gz + globe.svg (lens arc r=' + f(AR) + ')');
+console.log('wrote globe-thin/bold (stroke-authored) + globe.svg (lens arc r=' + f(AR) + ')');
