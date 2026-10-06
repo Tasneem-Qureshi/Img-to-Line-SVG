@@ -247,4 +247,11 @@ read as corners, needs the smooth-pin plumbing) and finishing 83.6 (floor
 88.5) carry it; everything else is up: pathCount 77.7 vs 70.3, centerline
 77.5 vs 64.5, anchors 99.5 vs 99.2, grammar 84.9 vs 83.4, topology 58.6 vs
 55.5. Still the merge BLOCKER it was.
-Remaining slices for 92cdd82: bold 240 / 480.
+Bold@240, n=400, 92cdd82: **ALL 2.8 vs 4.3 floor; crossWeight 13.3 vs 21**
+— both the 2026-09-25 veto-round blockers (2.3 / 12.3 then; +0.5 / +1.0 this
+round), not new. Sub-metrics: pathCount 24.8 vs 23.0, centerline 34.0 vs 35.3
+(−1.3), width 70.3 vs 69.3, anchors 97.7 vs 96.9, grammar 91.0 vs 91.8 (−0.8),
+topology 22.0 vs 22.5 (−0.5), finishing 85.7 vs 82.4 (+3.3), fitQuality 28.4
+vs 23.3 (+5.1). The bold tier's absolute level (≤5% all-pass) is the
+width-relative-veto problem ledgered on 09-25, unchanged in kind.
+Remaining slice for 92cdd82: bold 480.
