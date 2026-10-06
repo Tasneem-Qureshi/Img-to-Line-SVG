@@ -184,3 +184,26 @@ each, exactly one stroke weight by construction) assert the uniform-weight
 guarantees: one class, sharp classification, no warnings, coverage/phantom
 bounds, straight-bar and miter-corner geometry, and a 25%–400% thickness
 sweep.
+
+## Website
+
+The same tracer runs as a standalone web page — nothing is uploaded, the
+whole pipeline executes in the visitor's browser (a Web Worker), exactly as in
+the plugin.
+
+`web/index.html` is **generated** from `ui.html` so there is one source of
+truth: the plugin's styles, markup, tracer block and UI script are copied
+verbatim, the Figma-only "Use selected layer" button is hidden, "Add to
+canvas" becomes "Download SVG", and a small host shim at the end answers the
+messages the UI would normally send to Figma (`import-svg` → file download,
+`notify` → toast). A "Try an example" button feeds `web/example.png` through
+the plugin's own `selection-image` channel.
+
+```sh
+node web/build-web.js      # rebuild web/index.html after any change to ui.html
+python3 -m http.server 8765 --directory web   # then open http://localhost:8765/
+```
+
+Deploy = upload the `web/` folder to any static host (GitHub Pages, Netlify,
+Vercel, Cloudflare Pages). No server code, no build tooling beyond Node for
+the one-line build step.
