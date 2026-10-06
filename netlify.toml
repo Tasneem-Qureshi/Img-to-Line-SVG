@@ -1,0 +1,6 @@
+# Netlify: publish the static site in web/. When the site is connected to a Git
+# repo, the build step regenerates web/index.html from ui.html on every push;
+# for drag-and-drop deploys (Netlify Drop) index.html is already built.
+[build]
+  publish = "web"
+  command = "node web/build-web.js"

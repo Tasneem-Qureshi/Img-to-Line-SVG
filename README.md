@@ -193,17 +193,32 @@ the plugin.
 
 `web/index.html` is **generated** from `ui.html` so there is one source of
 truth: the plugin's styles, markup, tracer block and UI script are copied
-verbatim, the Figma-only "Use selected layer" button is hidden, "Add to
-canvas" becomes "Download SVG", and a small host shim at the end answers the
-messages the UI would normally send to Figma (`import-svg` → file download,
-`notify` → toast). A "Try an example" button feeds `web/example.png` through
-the plugin's own `selection-image` channel.
+verbatim, then adapted for the web at build time — the Figma-only "Use
+selected layer" button is hidden, "Add to canvas" becomes "Download SVG", and
+web-only actions are added (Upload image, Try an example, Download PNG,
+Share…, and an opt-in "send us this trace" form). A host shim at the end of the
+page answers the messages the UI would normally send to Figma (`import-svg` →
+file download, `notify` → toast). Images enter through the plugin's own
+`selection-image` channel; results are read back from the preview's blob URL,
+so the UI script itself needs no web-specific code.
 
 ```sh
-node web/build-web.js      # rebuild web/index.html after any change to ui.html
-python3 -m http.server 8765 --directory web   # then open http://localhost:8765/
+node web/build-web.js                           # rebuild after any change to ui.html
+python3 -m http.server 8765 --directory web     # then open http://localhost:8765/
 ```
 
-Deploy = upload the `web/` folder to any static host (GitHub Pages, Netlify,
-Vercel, Cloudflare Pages). No server code, no build tooling beyond Node for
-the one-line build step.
+### Hosting (free)
+
+The site is static files. **Netlify** is the recommended free host: drag the
+`web` folder onto <https://app.netlify.com/drop> and it is live with HTTPS;
+`netlify.toml` is included for a Git-connected site (publish dir `web`, build
+command `node web/build-web.js`). The "send us this trace" form uses
+**Netlify Forms** (free tier: 100 submissions/month, file uploads included) —
+after the first deploy, open the site's *Forms* tab and add an email
+notification for the `trace-report` form to receive each image + SVG + note.
+On hosts without form handling the rest of the site works; only that form
+reports an error when submitted.
+
+Other free options: Vercel / Cloudflare Pages (import the repo, no build
+command, output directory `web`) or GitHub Pages
+(`git subtree push --prefix web origin gh-pages`).
