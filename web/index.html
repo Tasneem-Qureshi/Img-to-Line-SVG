@@ -1789,10 +1789,13 @@ const LineTracer = (() => {
     };
     // two terminating arms converging on the same pool (a globe's meridian
     // arcs at a pole) attach, by skeleton, to two nodes a stroke-width apart
-    // and would land beside each other on the through-stroke. Their end
+    // and would end beside each other on the through-stroke. Their end
     // tangents intersect at the authored meeting point: when that lies on a
-    // through-stroke, both arms end at its nearest point (the pole).
-    {
+    // through-stroke, FUSE the two arms into one path through its nearest
+    // point (the pole). Two separate ends meeting on a ring render a notch;
+    // one joined path renders a clean corner — and when both ends of the
+    // same chain converge (a lens), it closes.
+    for (let guard = 0; guard < 8; guard++) {
       const arms = [];
       for (const c of list) {
         if (!c.trim || c.closed) continue;
@@ -1807,30 +1810,75 @@ const LineTracer = (() => {
           arms.push({ c, e, tr, end, dir: [dx / l, dy / l] }); // dir points OUT of the arm, into the pool
         }
       }
-      for (let i = 0; i < arms.length; i++) for (let j = i + 1; j < arms.length; j++) {
+      let fused = false;
+      for (let i = 0; i < arms.length && !fused; i++) for (let j = i + 1; j < arms.length && !fused; j++) {
         const A = arms[i], B = arms[j];
-        if (A.c === B.c) continue;
         const wAB = Math.max(A.c.width || 2, B.c.width || 2);
         if (Math.hypot(A.tr.p[0] - B.tr.p[0], A.tr.p[1] - B.tr.p[1]) > 2.5 * wAB) continue;
+        // both arms must be real strokes (a lens's arcs run ~12w); a short
+        // free-tailed piece beside a corner (a bell rim's end hook) is not an
+        // arm converging on a pole — fusing it bent the body and ate the rim
+        if ((A.c.geomLength || A.c.points.length) < 3 * wAB || (B.c.geomLength || B.c.points.length) < 3 * wAB) continue;
         const det = A.dir[0] * B.dir[1] - A.dir[1] * B.dir[0];
         if (Math.abs(det) < 0.25) continue; // not converging at a usable angle
         const t = ((B.end[0] - A.end[0]) * B.dir[1] - (B.end[1] - A.end[1]) * B.dir[0]) / det;
         const u = ((B.end[0] - A.end[0]) * A.dir[1] - (B.end[1] - A.end[1]) * A.dir[0]) / det;
         if (t < 0 || u < 0 || t > 3 * wAB || u > 3 * wAB) continue; // must meet ahead of both, nearby
         const X = [A.end[0] + A.dir[0] * t, A.end[1] + A.dir[1] * t];
-        // the through-stroke: another chain passing within ~0.6w of X
-        let foot = null, bd = 1.2 * wAB; // curved arms' end tangents overshoot the true meeting point by ~0.5w
+        // the through-stroke: another chain passing within ~1.2w of X (a
+        // curved arm's end tangent overshoots the true meeting point)
+        let foot = null, bd = 1.2 * wAB;
         for (const o of list) {
           if (o === A.c || o === B.c) continue;
           const pts = o.points;
           for (let k = 0; k < pts.length; k += 2) {
             const d = Math.hypot(pts[k][0] - X[0], pts[k][1] - X[1]);
-            if (d < bd) { bd = d; foot = pts[k]; }
+            if (d >= bd) continue;
+            // the through-stroke must pass THROUGH here: an interior point,
+            // at least a width away from its own ends (rings always qualify)
+            if (!o.closed) {
+              const p0 = pts[0], pz = pts[pts.length - 1];
+              if (Math.hypot(pts[k][0] - p0[0], pts[k][1] - p0[1]) < wAB ||
+                  Math.hypot(pts[k][0] - pz[0], pts[k][1] - pz[1]) < wAB) continue;
+            }
+            bd = d; foot = pts[k];
           }
         }
         if (!foot) continue;
-        A.tr.apex = foot.slice(); B.tr.apex = foot.slice();
+        const apex = foot.slice();
+        const a = A.c, b = B.c;
+        if (a === b) {
+          // both ends of one chain meet here: close it through the apex
+          a.points = a.points.concat([apex]);
+          a.closed = true;
+          a.forced = (a.forced || []).concat([apex]);
+          a.trim = [null, null];
+          fused = true;
+          break;
+        }
+        const ptsA = A.e === 1 ? a.points.slice() : a.points.slice().reverse(); // ends at the pool
+        const ptsB = B.e === 0 ? b.points.slice() : b.points.slice().reverse(); // starts at the pool
+        const lenA = a.geomLength != null ? a.geomLength : a.points.length;
+        const lenB = b.geomLength != null ? b.geomLength : b.points.length;
+        const ew = ch => ch.endWidths || [ch.width || 1, ch.width || 1];
+        const merged = {
+          closed: false,
+          forced: (a.forced || []).concat(b.forced || [], [apex]),
+          points: ptsA.concat([apex], ptsB),
+          width: ((a.width || 1) * lenA + (b.width || 1) * lenB) / ((lenA + lenB) || 1),
+          geomLength: lenA + lenB +
+            Math.hypot(apex[0] - ptsA[ptsA.length - 1][0], apex[1] - ptsA[ptsA.length - 1][1]) +
+            Math.hypot(ptsB[0][0] - apex[0], ptsB[0][1] - apex[1]),
+          endDeg: [A.e === 1 ? a.endDeg[0] : a.endDeg[1], B.e === 0 ? b.endDeg[1] : b.endDeg[0]],
+          endWidths: [A.e === 1 ? ew(a)[0] : ew(a)[1], B.e === 0 ? ew(b)[1] : ew(b)[0]],
+          caps: [A.e === 1 ? (a.caps || [])[0] : (a.caps || [])[1], B.e === 0 ? (b.caps || [])[1] : (b.caps || [])[0]],
+          trim: [a.trim ? a.trim[1 - A.e] : null, b.trim ? b.trim[1 - B.e] : null]
+        };
+        list = list.filter(c => c !== a && c !== b);
+        list.push(merged);
+        fused = true;
       }
+      if (!fused) break;
     }
     for (const c of list) {
       if (!c.trim) continue;

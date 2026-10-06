@@ -1783,27 +1783,26 @@ console.log('49. globe (test/failures): poles where three strokes converge, arcs
     const res = H4.traceRender(img);
     const tr = H4.parseTraced(res.svg, res.traceW, 28, -2);
     check(`globe ${weight}: one weight class`, res.weights.length === 1, `got ${res.weights.length}`);
-    check(`globe ${weight}: 5 paths (ring, 2 arcs, 2 lines)`, tr.subs.length === 5, `got ${tr.subs.length}`);
-    const ring = tr.subs.find(s => s.closed);
+    check(`globe ${weight}: 4 paths (ring, lens, 2 lines)`, tr.subs.length === 4, `got ${tr.subs.length}`);
+    const closed = tr.subs.filter(s => s.closed);
+    const ring = closed.find(s => s.poly.some(p => near4(p, 2, 12, 0.4)));
+    const lens = closed.find(s => s !== ring);
     check(`globe ${weight}: ring is a 4-anchor closed circle through the cardinal points`,
       !!ring && ring.anchors === 4 &&
       [[12, 2], [22, 12], [12, 22], [2, 12]].every(([x, y]) => ring.poly.some(p => near4(p, x, y, 0.25))),
-      ring ? `anchors ${ring.anchors}` : 'no closed path');
+      ring ? `anchors ${ring.anchors}` : 'no ring');
+    // the two meridian arcs fuse into ONE closed lens: anchors at the poles
+    // (on the ring) and at the equator — the authored structure
+    check(`globe ${weight}: lens is ONE closed 4-anchor path through both poles and the equator`,
+      !!lens && lens.anchors === 4 &&
+      [[12, 2], [12, 22], [7.4, 12], [16.6, 12]].every(([x, y]) => lens.poly.some(p => near4(p, x, y, 0.35))),
+      lens ? `anchors ${lens.anchors}` : 'no lens');
     const lines = tr.subs.filter(s => !s.closed && s.anchors === 2);
     check(`globe ${weight}: two latitude lines, 2-anchor straights at y=8.8 and y=15.2`,
       lines.length === 2 && lines.every(l => l.cmds.every(c => c.c === 'L')) &&
       [8.8, 15.2].every(y => lines.some(l => l.poly.every(p => Math.abs(p[1] - y) <= 0.25) &&
         Math.min(l.poly[0][0], l.poly[l.poly.length - 1][0]) <= 2.9 && Math.max(l.poly[0][0], l.poly[l.poly.length - 1][0]) >= 21.1)),
       `${lines.length} straight paths: ` + lines.map(l => l.cmds.map(c => c.c).join('')).join(','));
-    const arcs = tr.subs.filter(s => !s.closed && s.anchors === 3);
-    check(`globe ${weight}: two meridian arcs, 3 anchors each, ending AT the poles`,
-      arcs.length === 2 && arcs.every(a => {
-        const e0 = a.poly[0], e1 = a.poly[a.poly.length - 1];
-        return (near4(e0, 12, 2, 0.3) && near4(e1, 12, 22, 0.3)) || (near4(e1, 12, 2, 0.3) && near4(e0, 12, 22, 0.3));
-      }),
-      arcs.map(a => `${a.poly[0].map(v => v.toFixed(1))}..${a.poly[a.poly.length - 1].map(v => v.toFixed(1))}`).join(' | ') || 'none');
-    check(`globe ${weight}: arcs bulge to x=7.4 and x=16.6 at the equator`,
-      [7.4, 16.6].every(x => arcs.some(a => a.poly.some(p => near4(p, x, 12, 0.35)))), 'equator points missing');
     let worstGap = 1e9;
     for (const s of tr.subs) {
       const ap = [s.cmds.length ? s.cmds[0].pts[0] : s.startPt];

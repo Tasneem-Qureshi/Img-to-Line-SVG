@@ -154,7 +154,12 @@ Mechanisms (mergeChains):
 3. **terminating ends land at the partner's point nearest the junction node**
    (the ray along a curved arm's end tangent lands beside the true foot).
 4. **converging terminating arms** (two arcs at a pole): end tangents meet at
-   X; if a through-stroke passes within 1.2w of X, both arms end at its
-   nearest point — the pole — via `trim[e].apex`.
+   X; if a through-stroke passes within 1.2w of X (an interior point of it),
+   the two arms are FUSED into one path through that foot (forced apex), and
+   when both ends of one chain converge the chain closes — the lens becomes
+   ONE closed 4-anchor path, as authored, instead of two arcs whose caps
+   leave a notch at the pole. Guards: both arms ≥ 3w (a bell rim's end hook
+   beside a corner is not an arm — unguarded it bent the body and ate 1.5u
+   of the rim), foot ≥ 1w from the through-stroke's own ends.
 
 Website: the home-page example is now this globe (`web/example.png`).
