@@ -256,11 +256,14 @@ vs 23.3 (+5.1). The bold tier's absolute level (≤5% all-pass) is the
 width-relative-veto problem ledgered on 09-25, unchanged in kind.
 Bold@480, n=400, 92cdd82: **ALL 4.1 = 4.1 floor** (headline holds); crossWeight
 14.6 vs 22 (the 09-25 blocker: 13.3 then, +1.3 this round). pathCount 26.1 vs
-23.8, centerline **34.3 vs 37.1 (−2.8 — UNATTRIBUTED: no 09-25 bold@480
-centerline measurement exists; being measured on 6a86a88, the previous live
-build, to attribute)**, width 70.8 vs 69.1, anchors 98.0 = 98.0, grammar 89.5
-vs 90.0 (−0.5), topology 22.3 = 22.3, finishing 83.1 vs 82.6, fitQuality 28.6
-vs 24.3 (+4.3).
+23.8, centerline 34.3 vs 37.1 (−2.8 — PRE-EXISTING: 6a86a88, the previously
+live build, measures the identical 34.3 on the same slice, run from a detached
+worktree with the gitignored corpus dirs symlinked in), width 70.8 vs 69.1,
+anchors 98.0 = 98.0, grammar 89.5 vs 90.0 (−0.5), topology 22.3 = 22.3,
+finishing 83.1 vs 82.6, fitQuality 28.6 vs 24.3 (+4.3).
+This round alone at bold@480 (6a86a88 → 92cdd82): allPass 3.6 → 4.1, grammar
+89.3 → 89.5, topology 22.8 → 22.3, finishing 81.8 → 83.1, fitQuality 27.1 →
+28.6; pathCount, centerline, width, anchors and crossWeight identical.
 All five slices run for 92cdd82. Merge-to-main blockers unchanged in kind:
 clean-96 allPass, bold-240 allPass, bold crossWeight (all from the 09-25 veto
 round), plus finishing below floor on every clean tier since that round.
